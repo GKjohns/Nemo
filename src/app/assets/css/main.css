@@ -1,0 +1,47 @@
+@import "tailwindcss" theme(static);
+@import "@nuxt/ui";
+
+@theme static {
+  --font-sans: 'Public Sans', sans-serif;
+}
+
+:root {
+  --ui-primary: #1e293b;
+  --ui-border: #e2e8f0;
+  --ui-border-muted: #f1f5f9;
+  --ui-border-accented: #cbd5e1;
+  --ui-text: #334155;
+  --ui-text-highlighted: #0f172a;
+  --ui-text-muted: #64748b;
+  --ui-text-dimmed: #94a3b8;
+
+  --nemo-logo-bg: var(--ui-text-highlighted);
+  --nemo-logo-dot: #ffffff;
+}
+
+.dark {
+  --ui-primary: #e2e8f0;
+  --ui-bg: #0a0f16;
+  --ui-bg-muted: #0f141c;
+  --ui-bg-elevated: #151b25;
+  --ui-bg-accented: #1c2432;
+  --ui-border: #1e293b;
+  --ui-border-muted: #141c28;
+  --ui-border-accented: #253044;
+  --ui-text: #c8d0dc;
+  --ui-text-highlighted: #e2e8f0;
+  --ui-text-muted: #7e8b9d;
+  --ui-text-dimmed: #546175;
+
+  --nemo-logo-dot: var(--ui-bg);
+}
+
+::selection {
+  background-color: #cbd5e1;
+  color: #0f172a;
+}
+
+.dark ::selection {
+  background-color: #1e3a5f;
+  color: #e2e8f0;
+}
