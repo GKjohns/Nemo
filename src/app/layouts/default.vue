@@ -2,6 +2,7 @@
 import type { NavigationMenuItem } from '@nuxt/ui'
 
 const { sidebarOpen: open } = useApp()
+const isDev = import.meta.dev
 
 const links = [[{
   label: 'Sessions',
@@ -24,11 +25,23 @@ const links = [[{
   onSelect: () => {
     open.value = false
   }
-}], [{
-  label: 'Landing Page',
-  icon: 'i-lucide-rocket',
-  to: '/'
-}]] satisfies NavigationMenuItem[][]
+}], [
+  ...(isDev
+    ? [{
+        label: 'Dev Tools',
+        icon: 'i-lucide-wrench',
+        to: '/dev',
+        onSelect: () => {
+          open.value = false
+        }
+      }]
+    : []),
+  {
+    label: 'Landing Page',
+    icon: 'i-lucide-rocket',
+    to: '/'
+  }
+]] satisfies NavigationMenuItem[][]
 
 const groups = computed(() => [{
   id: 'links',
