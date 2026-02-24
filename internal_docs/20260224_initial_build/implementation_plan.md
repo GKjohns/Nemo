@@ -1,7 +1,7 @@
 # Nemo Implementation Plan
 
 **Date:** 2026-02-24  
-**Status:** Pending  
+**Status:** In Progress (Sprint 1 foundations completed)  
 **Author:** AI Assistant
 
 ## Overview
@@ -21,9 +21,9 @@ The project has a working Nuxt 4 scaffold with Nuxt UI, layouts, routing, color 
 
 ## Sprint 1: Project Structure + Data Layer
 
-Lay the foundation: define types, set up SQLite, build dataset ingestion, and scaffold the page structure that will carry through every subsequent sprint.
+Lay the foundation: define types, set up Supabase (Postgres), build dataset ingestion, and scaffold the page structure that will carry through every subsequent sprint.
 
-### 1.1 Clean Up Demo Content
+### 1.1 Clean Up Demo Content [✅ Completed]
 
 Remove the CRM placeholder pages and components. Keep the layout shell, navigation patterns, and shared utilities.
 
@@ -42,7 +42,7 @@ Remove the CRM placeholder pages and components. Keep the layout shell, navigati
 - `composables/useDashboard.ts` — gut and repurpose as `useApp.ts`
 - `pages/index.vue` — keep landing page, update copy for Nemo
 
-### 1.2 Core Type Definitions
+### 1.2 Core Type Definitions [✅ Completed]
 
 **File:** `server/core/types.ts`
 
@@ -172,69 +172,71 @@ export interface Session {
 }
 ```
 
-### 1.3 SQLite Database Setup
+### 1.3 Supabase Database Setup [✅ Completed]
 
-Install `better-sqlite3` for synchronous, fast local storage. No external database dependency.
+Use Supabase Postgres for persistent storage. All schema changes are handled through SQL migrations in `db_migrations/`.
 
-**File:** `server/db/schema.ts`
+**File:** `db_migrations/20260224_001_initial_nemo_schema.sql`
 
 ```sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS datasets (
-  id TEXT PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   description TEXT,
   source_type TEXT NOT NULL DEFAULT 'csv',
-  connection_info TEXT NOT NULL,  -- file path or connection string
-  profile TEXT,                   -- JSON: DatasetProfile
+  connection_info TEXT NOT NULL,  -- storage path or external connection string
+  profile JSONB,                  -- JSON: DatasetProfile
   row_count INTEGER,
   column_count INTEGER,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  dataset_id TEXT NOT NULL REFERENCES datasets(id),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dataset_id UUID NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
   hypothesis TEXT NOT NULL,
   context TEXT,
   status TEXT NOT NULL DEFAULT 'idle',
-  config TEXT NOT NULL,           -- JSON: SessionConfig
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  config JSONB NOT NULL,          -- JSON: SessionConfig
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   type TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'frontier',
   question TEXT,
   code TEXT,
-  result TEXT,                    -- JSON: NodeResult
+  result JSONB,                   -- JSON: NodeResult
   answer TEXT,
-  confidence REAL,
+  confidence DOUBLE PRECISION,
   summary TEXT,
-  supported_by TEXT,              -- JSON: string[]
+  supported_by JSONB,             -- JSON: string[]
   depth INTEGER NOT NULL DEFAULT 0,
-  priority REAL NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  priority DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS edges (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id),
-  source_id TEXT NOT NULL REFERENCES nodes(id),
-  target_id TEXT NOT NULL REFERENCES nodes(id),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  source_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  target_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   type TEXT NOT NULL,
   reasoning TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL REFERENCES sessions(id),
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   type TEXT NOT NULL,
-  payload TEXT NOT NULL,           -- JSON: NemoEvent
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  payload JSONB NOT NULL,          -- JSON: NemoEvent
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_nodes_session ON nodes(session_id);
@@ -242,15 +244,15 @@ CREATE INDEX idx_edges_session ON edges(session_id);
 CREATE INDEX idx_events_session ON events(session_id, id);
 ```
 
-**File:** `server/db/index.ts`
+**File:** `server/services/supabase.ts`
 
-Database initialization and access layer. Wraps `better-sqlite3` with typed helpers for CRUD on datasets, sessions, nodes, edges, and events.
+Supabase server client initialization and typed data access helpers for datasets, sessions, nodes, edges, and events.
 
-### 1.4 Dataset Upload + Profiling
+### 1.4 Dataset Upload + Profiling [✅ Completed]
 
 **File:** `server/api/datasets/index.post.ts`
 
-Accept CSV upload via multipart form data. Save to `data/uploads/`, parse with a CSV library, generate a `DatasetProfile` (column types, sample values, null counts, basic distribution stats), and persist to SQLite.
+Accept CSV upload via multipart form data. Save to Supabase Storage (`datasets` bucket), parse with a CSV library, generate a `DatasetProfile` (column types, sample values, null counts, basic distribution stats), and persist metadata/profile to Postgres.
 
 **File:** `server/api/datasets/[id]/profile.get.ts`
 
@@ -260,7 +262,7 @@ Return the stored profile for a dataset.
 
 List all datasets.
 
-### 1.5 Scaffold New Pages
+### 1.5 Scaffold New Pages [✅ Completed]
 
 Create stub pages wired into routing. Content comes in later sprints.
 
@@ -278,13 +280,13 @@ Update `layouts/default.vue` navigation:
 - Settings (cog icon)
 
 ### Sprint 1 Deliverables
-- [ ] Demo CRM content removed
-- [ ] Core types defined in `server/core/types.ts`
-- [ ] SQLite schema created and database initializes on startup
-- [ ] Dataset upload API accepts CSV and generates profile
-- [ ] Dataset list and profile retrieval APIs work
-- [ ] Page stubs exist for all routes with updated navigation
-- [ ] Layout updated with Nemo-specific sidebar links
+- [x] Demo CRM content removed
+- [x] Core types defined in `server/core/types.ts`
+- [x] Supabase migration created and applied via `db_migrations/`
+- [x] Dataset upload API accepts CSV and generates profile
+- [x] Dataset list and profile retrieval APIs work
+- [x] Page stubs exist for all routes with updated navigation
+- [x] Layout updated with Nemo-specific sidebar links
 
 ---
 
@@ -376,7 +378,7 @@ The Python harness script that loads data, runs code, and outputs structured JSO
 
 **File:** `server/core/graph.ts`
 
-In-memory + SQLite graph operations. The engine interacts with this, not raw SQL.
+In-memory + Supabase graph operations. The engine interacts with this, not raw SQL.
 
 ```typescript
 class GraphStore {
@@ -652,7 +654,7 @@ export function useSession(sessionId: string) {
 - [ ] Dive/pause/resume control endpoints work
 - [ ] SSE stream replays history then streams live events
 - [ ] `SessionManager` singleton manages engine lifecycle and event fanout
-- [ ] Events persisted to SQLite for replay on reconnect
+- [ ] Events persisted to Supabase for replay on reconnect
 - [ ] `useSession` composable connects, parses events, and maintains reactive state
 - [ ] End-to-end test: create session → dive → events stream to client
 
@@ -968,7 +970,7 @@ Update the existing landing page copy to accurately describe Nemo:
 │  SessionManager (singleton)                                   │
 │    → manages engine instances per session                     │
 │    → wires engine events to SSE subscribers                   │
-│    → persists events to SQLite for replay                     │
+│    → persists events to Supabase for replay                   │
 │                                                               │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │  Engine (pure, zero Nuxt imports)                       │  │
@@ -980,12 +982,12 @@ Update the existing landing page copy to accurately describe Nemo:
 │  │                                                         │  │
 │  │  ┌─────────────┐ ┌──────────────┐ ┌────────────────┐  │  │
 │  │  │  LLM Client │ │ Code Executor│ │  Graph Store   │  │  │
-│  │  │  (Claude)   │ │ (Python sub- │ │  (SQLite +     │  │  │
+│  │  │  (Claude)   │ │ (Python sub- │ │  (Supabase +   │  │  │
 │  │  │             │ │  process)    │ │   frontier)    │  │  │
 │  │  └─────────────┘ └──────────────┘ └────────────────┘  │  │
 │  └────────────────────────────────────────────────────────┘  │
 │                                                               │
-│  SQLite (better-sqlite3)                                      │
+│  Supabase Postgres + Storage                                  │
 │    datasets · sessions · nodes · edges · events               │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -1008,7 +1010,7 @@ Update the existing landing page copy to accurately describe Nemo:
 - [ ] SSE endpoint streams live events during active session
 - [ ] Reconnecting client receives full history + catches up
 - [ ] Pause/resume preserves engine state correctly
-- [ ] Events persist to SQLite and survive server restart
+- [ ] Events persist to Supabase and survive server restart
 
 ### Frontend (Sprint 4)
 - [ ] Graph renders nodes at correct positions with correct colors
@@ -1033,8 +1035,7 @@ Update the existing landing page copy to accurately describe Nemo:
 
 | Package | Purpose | Sprint |
 |---------|---------|--------|
-| `better-sqlite3` | Local SQLite database | 1 |
-| `@types/better-sqlite3` | TypeScript types | 1 |
+| `@supabase/supabase-js` | Supabase client for Postgres + Storage | 1 |
 | `csv-parse` | CSV file parsing | 1 |
 | `multer` or `formidable` | File upload handling | 1 |
 | `@anthropic-ai/sdk` | Claude API client | 2 |
@@ -1051,6 +1052,10 @@ Update the existing landing page copy to accurately describe Nemo:
 # LLM
 ANTHROPIC_API_KEY=sk-ant-...
 NEMO_DEFAULT_MODEL=claude-sonnet-4-20250514
+
+# Supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 
 # Execution
 NEMO_PYTHON_PATH=/usr/bin/python3
@@ -1069,8 +1074,8 @@ NEMO_REFLECT_EVERY=5
 | File | Sprint | Status | Purpose |
 |------|--------|--------|---------|
 | `server/core/types.ts` | 1 | ⬜ | All shared TypeScript types |
-| `server/db/schema.ts` | 1 | ⬜ | SQLite table definitions |
-| `server/db/index.ts` | 1 | ⬜ | Database initialization + access layer |
+| `db_migrations/20260224_001_initial_nemo_schema.sql` | 1 | [✅ Completed] | Supabase/Postgres schema migration |
+| `server/services/supabase.ts` | 1 | ⬜ | Supabase server client + data access helpers |
 | `server/api/datasets/index.post.ts` | 1 | ⬜ | Upload dataset |
 | `server/api/datasets/index.get.ts` | 1 | ⬜ | List datasets |
 | `server/api/datasets/[id]/profile.get.ts` | 1 | ⬜ | Get dataset profile |

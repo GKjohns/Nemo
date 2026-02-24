@@ -1,7 +1,11 @@
+<script setup lang="ts">
+const route = useRoute()
+</script>
+
 <template>
-  <UDashboardPanel id="settings">
+  <UDashboardPanel id="session-detail">
     <template #header>
-      <UDashboardNavbar title="Settings">
+      <UDashboardNavbar :title="`Session ${route.params.id}`">
         <template #leading>
           <UDashboardSidebarCollapse />
         </template>
@@ -9,9 +13,9 @@
     </template>
 
     <template #body>
-      <div class="max-w-3xl space-y-4">
+      <div class="space-y-3 max-w-3xl">
         <p class="text-sm text-muted">
-          Application settings UI will be implemented in a later sprint.
+          Graph exploration view will be implemented in a later sprint.
         </p>
       </div>
     </template>

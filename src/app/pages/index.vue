@@ -3,7 +3,7 @@ definePageMeta({ layout: 'landing' })
 
 const heroLinks = [{
   label: 'Start exploring',
-  to: '/home',
+  to: '/sessions',
   trailingIcon: 'i-lucide-arrow-right',
   size: 'xl' as const
 }, {
@@ -42,7 +42,7 @@ const features = [{
 
 const ctaLinks = [{
   label: 'Open dashboard',
-  to: '/home',
+  to: '/sessions',
   trailingIcon: 'i-lucide-arrow-right',
   color: 'neutral' as const
 }]

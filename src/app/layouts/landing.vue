@@ -15,7 +15,7 @@
         <UColorModeButton />
 
         <UButton
-          to="/home"
+          to="/sessions"
           label="Dashboard"
           color="neutral"
           variant="ghost"

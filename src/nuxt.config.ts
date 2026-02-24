@@ -3,8 +3,27 @@ export default defineNuxtConfig({
   modules: [
     '@nuxt/eslint',
     '@nuxt/ui',
+    '@nuxtjs/supabase',
     '@vueuse/nuxt'
   ],
+
+  supabase: {
+    url: process.env.SUPABASE_URL,
+    key: process.env.SUPABASE_ANON_KEY,
+    redirect: false,
+    cookieOptions: {
+      maxAge: 60 * 60 * 8,
+      domain: '',
+      path: '/',
+      sameSite: 'lax'
+    },
+    clientOptions: {
+      auth: {
+        detectSessionInUrl: true,
+        persistSession: true
+      }
+    }
+  },
 
   devtools: {
     enabled: true

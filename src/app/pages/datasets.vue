@@ -1,7 +1,7 @@
 <template>
-  <UDashboardPanel id="settings">
+  <UDashboardPanel id="datasets">
     <template #header>
-      <UDashboardNavbar title="Settings">
+      <UDashboardNavbar title="Datasets">
         <template #leading>
           <UDashboardSidebarCollapse />
         </template>
@@ -9,9 +9,9 @@
     </template>
 
     <template #body>
-      <div class="max-w-3xl space-y-4">
+      <div class="space-y-3 max-w-3xl">
         <p class="text-sm text-muted">
-          Application settings UI will be implemented in a later sprint.
+          Dataset upload and library table will be implemented in a later sprint.
         </p>
       </div>
     </template>

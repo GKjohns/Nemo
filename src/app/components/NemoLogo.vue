@@ -1,24 +1,28 @@
 <script setup lang="ts">
-withDefaults(defineProps<{
-  size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl'
+type LogoSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl'
+
+const props = withDefaults(defineProps<{
+  size?: LogoSize
 }>(), {
   size: 'md'
 })
 
-const dimensions: Record<string, { width: number, height: number }> = {
+const dimensions: Record<LogoSize, { width: number, height: number }> = {
   xs: { width: 16, height: 22 },
   sm: { width: 20, height: 27 },
   md: { width: 24, height: 32 },
   lg: { width: 32, height: 43 },
   xl: { width: 48, height: 64 }
 }
+
+const sizeDimensions = computed(() => dimensions[props.size])
 </script>
 
 <template>
   <svg
     xmlns="http://www.w3.org/2000/svg"
-    :width="dimensions[size].width"
-    :height="dimensions[size].height"
+    :width="sizeDimensions.width"
+    :height="sizeDimensions.height"
     viewBox="0 0 48 64"
     aria-label="Nemo logo"
   >

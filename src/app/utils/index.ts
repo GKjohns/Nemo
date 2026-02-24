@@ -1,7 +1,14 @@
-export function randomInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min
+export function formatRelativeDateTime(isoDate: string): string {
+  const date = new Date(isoDate)
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(date)
 }
 
-export function randomFrom<T>(array: T[]): T {
-  return array[Math.floor(Math.random() * array.length)]!
+export function formatSessionStatus(status: string): string {
+  return status
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
 }
