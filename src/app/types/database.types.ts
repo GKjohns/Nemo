@@ -89,6 +89,8 @@ export interface Database {
           result: NodeResult | null
           answer: string | null
           confidence: number | null
+          viz_spec: Json | null
+          chart_image_url: string | null
           summary: string | null
           supported_by: string[] | null
           depth: number
@@ -105,6 +107,8 @@ export interface Database {
           result?: NodeResult | null
           answer?: string | null
           confidence?: number | null
+          viz_spec?: Json | null
+          chart_image_url?: string | null
           summary?: string | null
           supported_by?: string[] | null
           depth?: number
@@ -120,6 +124,8 @@ export interface Database {
           result?: NodeResult | null
           answer?: string | null
           confidence?: number | null
+          viz_spec?: Json | null
+          chart_image_url?: string | null
           summary?: string | null
           supported_by?: string[] | null
           depth?: number

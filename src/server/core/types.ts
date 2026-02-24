@@ -34,6 +34,16 @@ export interface NodeResult {
   data: unknown
 }
 
+export type VizKind = 'bar' | 'line' | 'scatter'
+
+export interface VizSpec {
+  kind: VizKind
+  x: string
+  y: string
+  series?: string | null
+  title?: string | null
+}
+
 export interface Node {
   id: string
   session_id: string
@@ -44,6 +54,8 @@ export interface Node {
   result: NodeResult | null
   answer: string | null
   confidence: number | null
+  viz_spec: VizSpec | null
+  chart_image_url: string | null
   summary: string | null
   supported_by: string[] | null
   depth: number
@@ -63,12 +75,12 @@ export interface Edge {
   created_at: string
 }
 
-export type NemoEvent =
-  | { type: 'node:created'; node: Node }
-  | { type: 'node:updated'; node: Node }
-  | { type: 'edge:created'; edge: Edge }
-  | { type: 'session:status'; status: SessionStatus }
-  | { type: 'session:error'; error: string }
+export type NemoEvent
+  = | { type: 'node:created', node: Node }
+    | { type: 'node:updated', node: Node }
+    | { type: 'edge:created', edge: Edge }
+    | { type: 'session:status', status: SessionStatus }
+    | { type: 'session:error', error: string }
 
 export interface FeedItem {
   id: string
@@ -77,4 +89,16 @@ export interface FeedItem {
   title: string
   detail: string | null
   node_id: string | null
+}
+
+export interface GraphContext {
+  hypothesis: string
+  nodes: Node[]
+  edges: Edge[]
+  stats: {
+    node_count: number
+    edge_count: number
+    max_depth: number
+    frontier_count: number
+  }
 }
