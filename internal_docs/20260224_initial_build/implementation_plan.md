@@ -1,7 +1,7 @@
 # Nemo Implementation Plan
 
 **Date:** 2026-02-24  
-**Status:** In Progress (Sprint 1 foundations completed)  
+**Status:** In Progress (Sprint 3 streaming completed)  
 **Author:** AI Assistant
 
 ## Overview
@@ -19,7 +19,7 @@ The project has a working Nuxt 4 scaffold with Nuxt UI, layouts, routing, color 
 
 ---
 
-## Sprint 1: Project Structure + Data Layer
+## Sprint 1: Project Structure + Data Layer [✅ Completed]
 
 Lay the foundation: define types, set up Supabase (Postgres), build dataset ingestion, and scaffold the page structure that will carry through every subsequent sprint.
 
@@ -84,8 +84,16 @@ export type NodeType = 'hypothesis' | 'insight' | 'synthesis'
 export type NodeStatus = 'frontier' | 'exploring' | 'complete' | 'dead_end'
 
 export interface NodeResult {
-  type: 'table' | 'chart' | 'scalar' | 'error'
-  data: any // JSON table, Plotly spec, number, or error string
+  type: 'table' | 'scalar' | 'error'
+  data: any // JSON table, number, or error string
+}
+
+export interface VizSpec {
+  kind: 'bar' | 'line' | 'scatter' | 'histogram' | 'heatmap' | 'pie'
+  x: string          // column name for x-axis
+  y: string          // column name for y-axis
+  group_by?: string  // optional grouping column
+  title?: string     // chart title
 }
 
 export interface Node {
@@ -94,12 +102,14 @@ export interface Node {
   type: NodeType
   status: NodeStatus
   question: string | null
-  code: string | null
+  code: string | null             // generated SQL query
   result: NodeResult | null
   answer: string | null
   confidence: number | null
-  summary: string | null        // synthesis nodes only
-  supported_by: string[] | null // synthesis nodes only
+  viz_spec: VizSpec | null        // declarative chart config (LLM-suggested)
+  chart_image_url: string | null  // server-rendered chart image URL
+  summary: string | null          // synthesis nodes only
+  supported_by: string[] | null   // synthesis nodes only
   depth: number
   priority: number
   created_at: string
@@ -210,12 +220,14 @@ CREATE TABLE IF NOT EXISTS nodes (
   type TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'frontier',
   question TEXT,
-  code TEXT,
-  result JSONB,                   -- JSON: NodeResult
+  code TEXT,                        -- generated SQL query
+  result JSONB,                     -- JSON: NodeResult
   answer TEXT,
   confidence DOUBLE PRECISION,
+  viz_spec JSONB,                   -- JSON: VizSpec (chart config)
+  chart_image_url TEXT,             -- server-rendered chart image URL
   summary TEXT,
-  supported_by JSONB,             -- JSON: string[]
+  supported_by JSONB,               -- JSON: string[]
   depth INTEGER NOT NULL DEFAULT 0,
   priority DOUBLE PRECISION NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -290,15 +302,16 @@ Update `layouts/default.vue` navigation:
 
 ---
 
-## Sprint 2: Engine Core + Execution
+## Sprint 2: Engine Core + Execution [✅ Completed]
 
 Build the exploration engine as a pure module with zero Nuxt imports. It takes a graph, a dataset profile, and a hypothesis — and produces a stream of events. Testable from a standalone script.
 
-### 2.1 LLM Client
+### 2.1 LLM Client [✅ Completed]
 
 **File:** `server/core/llm.ts`
 
-Thin wrapper around the Anthropic Claude API. Each method maps to a specific role in the exploration loop.
+Thin wrapper around the OpenAI Responses API. Each method maps to a specific role in the exploration loop.  
+Use `instructions` + `input` with reasoning models (`gpt-5.2` / `gpt-5-mini`) and strict structured output via `text.format` JSON Schema.
 
 ```typescript
 class LLMClient {
@@ -307,13 +320,14 @@ class LLMClient {
   // Given graph state + frontier node, generate the next question to investigate
   async generateQuestion(node: Node, graphContext: GraphContext): Promise<string>
 
-  // Given a question + dataset schema, generate executable Python/SQL
-  async generateCode(question: string, profile: DatasetProfile): Promise<string>
+  // Given a question + dataset schema, generate a SQL query
+  async generateSQL(question: string, profile: DatasetProfile): Promise<string>
 
-  // Given execution result + original question, interpret the finding
+  // Given execution result + original question, interpret and optionally suggest visualization
   async interpret(result: NodeResult, question: string): Promise<{
     answer: string
     confidence: number
+    viz_spec: VizSpec | null
   }>
 
   // Given a completed node + graph, classify edges to existing nodes
@@ -331,58 +345,88 @@ class LLMClient {
 }
 ```
 
-### 2.2 Prompt Templates
+### 2.2 Prompt Templates [✅ Completed]
 
 **File:** `server/core/prompts.ts`
 
-All LLM prompt templates centralized. Each function returns a structured prompt (system + user messages) for a specific engine step. Includes the dataset profile, current graph state serialization, and clear output format instructions.
+All LLM prompt templates centralized. Each function returns a structured prompt for the Responses API (`instructions` + `input`) for a specific engine step.  
+Templates include dataset profile, current graph state serialization, and explicit JSON-schema-constrained output requirements.
 
 Key prompts:
 - `questionPrompt` — frontier selection + question generation
-- `codePrompt` — Python/SQL generation with schema context
-- `interpretPrompt` — result analysis + confidence scoring
+- `sqlPrompt` — SQL query generation with schema context (SELECT-only, DuckDB dialect)
+- `interpretPrompt` — result analysis + confidence scoring + optional viz_spec suggestion
 - `edgePrompt` — relationship classification between nodes
 - `nextPrompt` — follow-up question generation
-- `synthesisPrompt` — periodic reflection and narrative building
+- `synthesisPrompt` — periodic reflection and narrative building (can include chart images as vision input)
 
-### 2.3 Code Executor
+### 2.3 DuckDB Executor + Chart Renderer [✅ Completed]
+
+> **Architecture change:** User datasets are NOT stored as Postgres tables. CSV files live in Supabase Storage, and LLM-generated queries run against them using DuckDB — an in-process columnar SQL engine. This gives complete isolation between app data (Postgres) and user data (DuckDB on files), avoids schema management for uploads, and is inherently read-only.
 
 **File:** `server/core/executor.ts`
 
-Runs LLM-generated Python in a sandboxed subprocess. The dataset is pre-loaded as a pandas DataFrame.
+Runs LLM-generated SQL against CSV files using DuckDB. No Postgres table per dataset, no subprocess — just an in-process query engine.
 
 ```typescript
-class CodeExecutor {
-  constructor(private config: { timeout: number; dataDir: string }) {}
+class DuckDbExecutor {
+  constructor(config?: { maxRows?: number }) {}
 
-  // Execute Python code with the dataset available as `df`
-  // Returns structured output: table, chart (Plotly JSON), scalar, or error
-  async run(code: string, datasetPath: string): Promise<NodeResult>
+  // Execute a SQL query against a CSV file
+  // Creates a DuckDB view called "dataset" via read_csv_auto, then runs the query
+  // Returns structured output: table, scalar, or error
+  async run(sql: string, csvPath: string): Promise<NodeResult>
 }
 ```
 
 Implementation:
-- Spawn a Python subprocess with a wrapper script that:
-  - Loads the dataset into a pandas DataFrame (`df`)
-  - Executes the generated code
-  - Captures output: if the result is a DataFrame → serialize as JSON table; if a Plotly figure → serialize as JSON spec; if a scalar → wrap as `{ type: 'scalar', data: value }`
-  - Catches exceptions → `{ type: 'error', data: error_message }`
-- Enforces a timeout (default 30s) to prevent runaway queries
-- Captures stdout/stderr for debugging
+- Opens an in-memory DuckDB instance per query
+- Creates a temp view: `CREATE VIEW "dataset" AS SELECT * FROM read_csv_auto('<csvPath>')`
+- LLM-generated SQL references `dataset` as the table name
+- Validate query before execution:
+  - Must be a single `SELECT` statement (reject `INSERT`, `UPDATE`, `DELETE`, `DROP`, etc.)
+  - Must reference the `dataset` table alias
+  - Automatically append `LIMIT` if not present (default 1000 rows)
+- Normalize results:
+  - Multiple rows → `{ type: 'table', data: { columns, rows, row_count, truncated } }`
+  - Single value → `{ type: 'scalar', data: value }`
+  - Exceptions → `{ type: 'error', data: { message, detail } }`
+- Inherently read-only — DuckDB on a CSV file cannot mutate anything
+- No Postgres connection needed, serverless-compatible
 
-**File:** `server/core/executor_wrapper.py`
+**File:** `server/core/chartRenderer.ts`
 
-The Python harness script that loads data, runs code, and outputs structured JSON.
+Server-side chart image generation for LLM visual analysis. Uses a Node.js charting library to render a `VizSpec` + result data into a PNG image.
 
-### 2.4 Graph Store
+```typescript
+class ChartRenderer {
+  // Render a chart image from result data + viz spec
+  // Returns the URL of the stored chart image (Supabase Storage)
+  async render(result: NodeResult, vizSpec: VizSpec): Promise<string>
+}
+```
+
+Implementation:
+- Takes `result.data` (table rows) + `VizSpec` (kind, axes, grouping)
+- Renders chart to PNG using a Node.js charting library (e.g. `chartjs-node-canvas`)
+- Uploads image to Supabase Storage (`chart-images` bucket)
+- Returns the public URL
+- Used for two purposes:
+  1. LLM vision input — the model can "see" charts during synthesis/reflection steps
+  2. Cached artifact — client can display the pre-rendered image alongside the interactive chart
+
+### 2.4 Graph Store [✅ Completed]
 
 **File:** `server/core/graph.ts`
 
-In-memory + Supabase graph operations. The engine interacts with this, not raw SQL.
+In-memory + optional Supabase graph operations. The engine interacts with this, not raw SQL. Supabase client is optional — when omitted, the store is purely in-memory (enables standalone engine testing). When provided, all mutations write through to Postgres.
 
 ```typescript
 class GraphStore {
-  constructor(private db: Database, private sessionId: string) {}
+  constructor(private sessionId: string, private hypothesis: string, private supabase?: SupabaseClient) {}
+
+  // Hydrate from Supabase (for session resume)
+  async load(): Promise<void>
 
   // Node operations
   async createNode(node: Omit<Node, 'id' | 'created_at'>): Promise<Node>
@@ -407,21 +451,22 @@ class GraphStore {
 }
 ```
 
-### 2.5 Frontier Priority
+### 2.5 Frontier Priority [✅ Completed]
 
 **File:** `server/core/frontier.ts`
 
 Simple priority scoring for frontier selection. Start conservative, get smarter later.
 
 ```
-priority = (1 - parent_confidence) × depth_penalty(depth)
+priority = uncertainty × depthPenalty × siblingPenalty
+         = (1 - parent_confidence) × 1/(1 + 0.2×depth) × max(0.1, 1 - 0.15×dead_end_siblings)
 ```
 
 - Low-confidence parents produce high-priority children (investigate uncertainty first)
 - Depth penalty decays with distance from root (prefer breadth near the top)
 - Dead-end siblings reduce priority (don't keep hitting the same wall)
 
-### 2.6 Engine Outer Loop
+### 2.6 Engine Outer Loop [✅ Completed]
 
 **File:** `server/core/engine.ts`
 
@@ -432,9 +477,10 @@ class NemoEngine {
   constructor(
     private graph: GraphStore,
     private dataset: DatasetProfile,
-    private datasetPath: string,
+    private csvPath: string,
     private llm: LLMClient,
-    private executor: CodeExecutor,
+    private executor: DuckDbExecutor,
+    private chartRenderer: ChartRenderer,
     private config: SessionConfig
   ) {}
 
@@ -452,15 +498,23 @@ class NemoEngine {
       // Explore
       emit({ type: 'node:updated', node: { ...next, status: 'exploring' } })
       const question = await this.llm.generateQuestion(next, await this.graph.getGraphContext())
-      const code = await this.llm.generateCode(question, this.dataset)
-      const result = await this.executor.run(code, this.datasetPath)
+      const sql = await this.llm.generateSQL(question, this.dataset)
+      const result = await this.executor.run(sql, this.csvPath)
       const interpretation = await this.llm.interpret(result, question)
+
+      // Visualize (if LLM suggests a chart)
+      let chartImageUrl: string | null = null
+      if (interpretation.viz_spec && result.type === 'table') {
+        chartImageUrl = await this.chartRenderer.render(result, interpretation.viz_spec)
+      }
 
       // Integrate
       const completed = await this.graph.updateNode(next.id, {
-        question, code, result,
+        question, code: sql, result,
         answer: interpretation.answer,
         confidence: interpretation.confidence,
+        viz_spec: interpretation.viz_spec ?? null,
+        chart_image_url: chartImageUrl,
         status: 'complete'
       })
       emit({ type: 'node:updated', node: completed })
@@ -515,21 +569,36 @@ class NemoEngine {
 ```
 
 ### Sprint 2 Deliverables
-- [ ] `LLMClient` wraps Claude API with all six methods
-- [ ] Prompt templates produce well-structured, consistent LLM inputs
-- [ ] `CodeExecutor` runs Python in subprocess with pandas/plotly, returns structured results
-- [ ] `GraphStore` handles all node/edge CRUD and frontier selection
-- [ ] Frontier priority scoring works correctly
-- [ ] `NemoEngine.run(emit)` executes the full loop and emits typed events
-- [ ] Engine can run standalone (e.g., `engine.run(console.log)` in a test script)
+- [x] `LLMClient` wraps OpenAI Responses API with all six methods
+- [x] Prompt templates produce well-structured, consistent LLM inputs
+- [x] `DuckDbExecutor` runs SQL against CSV files via DuckDB, returns structured results
+- [x] `ChartRenderer` generates chart images from result data + viz_spec for LLM vision input
+- [x] `GraphStore` handles all node/edge CRUD and frontier selection
+- [x] Frontier priority scoring works correctly
+- [x] `NemoEngine.run(emit)` executes the full loop and emits typed events
+- [x] Engine can run standalone (e.g., `engine.run(console.log)` in a test script)
 
 ---
 
-## Sprint 3: Session APIs + Real-time Streaming
+## Sprint 3: Session APIs + Real-time Streaming [✅ Completed]
 
 Wire the engine to the HTTP layer. Session CRUD, SSE streaming, event persistence, and the frontend composable that makes the graph feel alive.
 
-### 3.1 Session CRUD
+### Sprint 3 Chunking
+
+To keep execution focused, Sprint 3 is grouped into two logical chunks:
+
+**Chunk 1 (Backend session foundation) — [x] Completed**
+- Session CRUD APIs (`create`, `list`, `get` with full graph)
+- Session controls (`dive`, `pause`, `resume`)
+- `SessionManager` glue layer for engine lifecycle, event persistence, and subscriber fanout
+
+**Chunk 2 (Real-time client flow) — [x] Completed**
+- SSE stream endpoint with history replay + live events
+- Frontend `useSession` composable
+- End-to-end streaming validation from session creation through active dive updates
+
+### 3.1 Session CRUD [✅ Completed]
 
 **File:** `server/api/sessions/index.post.ts`
 
@@ -543,7 +612,7 @@ List all sessions with summary info (hypothesis, status, node count, last update
 
 Get a single session with its full graph (all nodes and edges). Used for initial page load before the SSE stream connects.
 
-### 3.2 Session Controls
+### 3.2 Session Controls [✅ Completed]
 
 **File:** `server/api/sessions/[id]/dive.post.ts`
 
@@ -557,7 +626,7 @@ Pause the running engine. It finishes the current node, then stops.
 
 Resume a paused session. Re-initializes the engine from persisted state and continues.
 
-### 3.3 SSE Streaming
+### 3.3 SSE Streaming [✅ Completed]
 
 **File:** `server/api/sessions/[id]/stream.get.ts`
 
@@ -586,7 +655,7 @@ export default defineEventHandler(async (event) => {
 })
 ```
 
-### 3.4 Session Service (Glue Layer)
+### 3.4 Session Service (Glue Layer) [✅ Completed]
 
 **File:** `server/services/session.ts`
 
@@ -612,7 +681,7 @@ class SessionManager {
 
 Singleton instance exported for use by API routes.
 
-### 3.5 Frontend Composable
+### 3.5 Frontend Composable [✅ Completed]
 
 **File:** `app/composables/useSession.ts`
 
@@ -650,13 +719,13 @@ export function useSession(sessionId: string) {
 ```
 
 ### Sprint 3 Deliverables
-- [ ] Session CRUD APIs (create, list, get with full graph)
-- [ ] Dive/pause/resume control endpoints work
-- [ ] SSE stream replays history then streams live events
-- [ ] `SessionManager` singleton manages engine lifecycle and event fanout
-- [ ] Events persisted to Supabase for replay on reconnect
-- [ ] `useSession` composable connects, parses events, and maintains reactive state
-- [ ] End-to-end test: create session → dive → events stream to client
+- [x] Session CRUD APIs (create, list, get with full graph)
+- [x] Dive/pause/resume control endpoints work
+- [x] SSE stream replays history then streams live events
+- [x] `SessionManager` singleton manages engine lifecycle and event fanout
+- [x] Events persisted to Supabase for replay on reconnect
+- [x] `useSession` composable connects, parses events, and maintains reactive state
+- [x] End-to-end test: create session → dive → events stream to client
 
 ---
 
@@ -664,7 +733,7 @@ export function useSession(sessionId: string) {
 
 Build the main event — the three-panel session view where you watch Nemo think. Graph visualization, activity feed, node detail, and session controls.
 
-### 4.1 Session Page Layout
+### 4.1 Session Page Layout [✅ Completed]
 
 **File:** `app/pages/sessions/[id].vue`
 
@@ -683,7 +752,7 @@ Three-panel layout using the dashboard layout:
 
 Uses `useSession()` composable for all state. Selecting a node in the graph opens the detail panel.
 
-### 4.2 Graph Visualization
+### 4.2 Graph Visualization [✅ Completed]
 
 **File:** `app/components/graph/ExplorationGraph.vue`
 
@@ -702,7 +771,7 @@ Force-directed graph rendered with D3. The centerpiece of the UI.
 
 **File:** `app/components/graph/GraphEdge.vue` — SVG edge rendering (line + arrow + optional label)
 
-### 4.3 Activity Feed
+### 4.3 Activity Feed [✅ Completed]
 
 **File:** `app/components/session/ActivityFeed.vue`
 
@@ -714,7 +783,7 @@ Streaming log of what Nemo is doing. Reads from `feed` ref in `useSession()`.
 - Auto-scrolls to bottom as new entries arrive (with scroll-lock override if user scrolls up)
 - Status changes show as dividers ("Diving...", "Reflecting...", "Surfaced")
 
-### 4.4 Node Detail Panel
+### 4.4 Node Detail Panel [✅ Completed]
 
 **File:** `app/components/session/NodeDetail.vue`
 
@@ -722,7 +791,7 @@ Right panel that opens when a node is selected. Uses Nuxt UI tabs.
 
 **Tabs:**
 1. **Question** — what was asked, why, link to parent node
-2. **Code** — syntax-highlighted generated Python/SQL (use Shiki or similar)
+2. **Code** — syntax-highlighted generated SQL (use Shiki or similar)
 3. **Result** — rendered output via `NodeResult.vue`
 4. **Interpretation** — LLM answer text + confidence score badge
 5. **Connections** — list of edges to/from this node with type, target node, and reasoning
@@ -735,12 +804,13 @@ Renders the `NodeResult` based on its type:
 
 | Type | Rendering |
 |------|-----------|
-| `table` | `UTable` with sorting, scrollable |
-| `chart` | Plotly chart rendered interactively (use `plotly.js-dist-min`) |
+| `table` | `UTable` with sorting, scrollable. If `viz_spec` exists, render interactive chart above table using Chart.js. |
 | `scalar` | Large number with label and context |
 | `error` | Error message with red styling |
 
-### 4.5 Session Controls
+Server-rendered `chart_image_url` is available as fallback or for export.
+
+### 4.5 Session Controls [✅ Completed]
 
 **File:** `app/components/session/SessionControls.vue`
 
@@ -752,7 +822,7 @@ Top bar controls:
 - Node count display
 - Current depth display
 
-### 4.6 Synthesis Summary
+### 4.6 Synthesis Summary [✅ Completed]
 
 **File:** `app/components/session/SynthesisSummary.vue`
 
@@ -762,16 +832,16 @@ Rendered for synthesis nodes in the detail panel and in the summary view. Shows:
 - Evidence list (links to supporting nodes)
 
 ### Sprint 4 Deliverables
-- [ ] Session page renders three-panel layout
-- [ ] D3 force-directed graph renders nodes and edges with correct colors
-- [ ] Graph animates smoothly as new nodes/edges stream in
-- [ ] Clicking a node opens the detail panel
-- [ ] Currently exploring node pulses
-- [ ] Activity feed streams entries and auto-scrolls
-- [ ] Node detail panel shows all tabs (question, code, result, interpretation, connections)
-- [ ] Result renderer handles tables, Plotly charts, scalars, and errors
-- [ ] Session controls (pause/resume/stop) work end-to-end
-- [ ] Top bar shows live status, hypothesis, and node count
+- [x] Session page renders three-panel layout
+- [x] D3 force-directed graph renders nodes and edges with correct colors
+- [x] Graph animates smoothly as new nodes/edges stream in
+- [x] Clicking a node opens the detail panel
+- [x] Currently exploring node pulses
+- [x] Activity feed streams entries and auto-scrolls
+- [x] Node detail panel shows all tabs (question, code, result, interpretation, connections)
+- [x] Result renderer handles tables (with optional Chart.js visualization), scalars, and errors
+- [x] Session controls (pause/resume/stop) work end-to-end
+- [x] Top bar shows live status, hypothesis, and node count
 
 ---
 
@@ -779,7 +849,7 @@ Rendered for synthesis nodes in the detail panel and in the summary view. Shows:
 
 Build the remaining pages, wire up the new session flow end-to-end, and polish the experience.
 
-### 5.1 Sessions List (Home)
+### 5.1 Sessions List (Home) [✅ Completed]
 
 **File:** `app/pages/sessions.vue`
 
@@ -791,7 +861,7 @@ The entry point after the landing page. Clean list of past sessions.
 - Empty state with onboarding prompt
 - Sort by recent / status filter
 
-### 5.2 New Session Setup
+### 5.2 New Session Setup [✅ Completed]
 
 **File:** `app/pages/sessions/new.vue`
 
@@ -809,10 +879,10 @@ Two-step flow using a `UStepper` or tab-based progression.
 - Configuration controls (collapsible "Advanced"):
   - Max nodes (default 50)
   - Reflection frequency (default every 5 nodes)
-  - Model selection (default Claude Sonnet)
+  - Model selection (default gpt-5-mini)
 - "Dive" button → creates session → navigates to session view → auto-starts engine
 
-### 5.3 Summary View
+### 5.3 Summary View [✅ Completed]
 
 **File:** `app/components/session/SummaryView.vue`
 
@@ -826,7 +896,7 @@ Accessible from the session view when status is `surfaced`, or via a tab/button 
 - Original hypothesis with verdict: **Supported** / **Refuted** / **Complicated** / **Insufficient Evidence**
 - Export as markdown (copy to clipboard or download)
 
-### 5.4 Dataset Explorer
+### 5.4 Dataset Explorer [✅ Completed]
 
 **File:** `app/pages/datasets.vue`
 
@@ -858,10 +928,10 @@ Update the existing landing page copy to accurately describe Nemo:
 - **Toast notifications:** Surface important events (session surfaced, errors) as toasts
 
 ### Sprint 5 Deliverables
-- [ ] Sessions list page with session cards and graph thumbnails
-- [ ] New session setup flow works end-to-end (upload → hypothesis → dive)
-- [ ] Summary view renders synthesis, key findings, and verdict
-- [ ] Dataset explorer shows schema, sample data, and column stats
+- [x] Sessions list page with session cards and graph thumbnails
+- [x] New session setup flow works end-to-end (upload → hypothesis → dive)
+- [x] Summary view renders synthesis, key findings, and verdict
+- [x] Dataset explorer shows schema, sample data, and column stats
 - [ ] Landing page updated with accurate Nemo messaging
 - [ ] Responsive layout for all views
 - [ ] Error handling covers LLM failures, execution timeouts, and connection drops
@@ -981,10 +1051,15 @@ Update the existing landing page copy to accurately describe Nemo:
 │  │    → Suggest next → Reflect (periodic)                  │  │
 │  │                                                         │  │
 │  │  ┌─────────────┐ ┌──────────────┐ ┌────────────────┐  │  │
-│  │  │  LLM Client │ │ Code Executor│ │  Graph Store   │  │  │
-│  │  │  (Claude)   │ │ (Python sub- │ │  (Supabase +   │  │  │
-│  │  │             │ │  process)    │ │   frontier)    │  │  │
+│  │  │  LLM Client │ │ SQL Executor │ │  Graph Store   │  │  │
+│  │  │  (OpenAI)   │ │ (Postgres    │ │  (Supabase +   │  │  │
+│  │  │             │ │  read-only)  │ │   frontier)    │  │  │
 │  │  └─────────────┘ └──────────────┘ └────────────────┘  │  │
+│  │                  ┌──────────────┐                      │  │
+│  │                  │ Chart Render │                      │  │
+│  │                  │ (Node.js →   │                      │  │
+│  │                  │  PNG → LLM)  │                      │  │
+│  │                  └──────────────┘                      │  │
 │  └────────────────────────────────────────────────────────┘  │
 │                                                               │
 │  Supabase Postgres + Storage                                  │
@@ -999,8 +1074,10 @@ Update the existing landing page copy to accurately describe Nemo:
 ### Engine (Sprint 2)
 - [ ] Engine runs standalone with `engine.run(console.log)` and produces valid events
 - [ ] LLM client generates reasonable questions given a dataset profile
-- [ ] Code executor runs Python and returns structured table/chart/scalar results
-- [ ] Code executor enforces timeout on long-running scripts
+- [ ] SQL executor runs queries and returns structured table/scalar results
+- [ ] SQL executor enforces statement_timeout and rejects non-SELECT statements
+- [ ] Chart renderer generates PNG from result data + viz_spec
+- [ ] Chart images are uploaded to Supabase Storage and URL stored on node
 - [ ] Frontier selection picks highest-priority node
 - [ ] Reflection triggers at configured interval
 - [ ] Engine stops at max_nodes limit
@@ -1017,7 +1094,7 @@ Update the existing landing page copy to accurately describe Nemo:
 - [ ] New nodes animate in smoothly (no full graph re-layout)
 - [ ] Clicking a node opens detail panel with correct data
 - [ ] Activity feed auto-scrolls and respects scroll-lock
-- [ ] Plotly charts render interactively from JSON specs
+- [ ] Charts render from result data + viz_spec using Chart.js
 - [ ] Data tables sort correctly
 - [ ] Session controls update engine state and UI reflects changes
 
@@ -1038,10 +1115,11 @@ Update the existing landing page copy to accurately describe Nemo:
 | `@supabase/supabase-js` | Supabase client for Postgres + Storage | 1 |
 | `csv-parse` | CSV file parsing | 1 |
 | `multer` or `formidable` | File upload handling | 1 |
-| `@anthropic-ai/sdk` | Claude API client | 2 |
+| `openai` | OpenAI Responses API client | 2 |
+| `chartjs-node-canvas` | Server-side chart rendering (PNG) | 2 |
 | `d3` | Force-directed graph visualization | 4 |
 | `@types/d3` | TypeScript types | 4 |
-| `plotly.js-dist-min` | Chart rendering in node results | 4 |
+| `chart.js` | Client-side interactive chart rendering | 4 |
 | `shiki` | Syntax highlighting for generated code | 4 |
 
 ---
@@ -1050,17 +1128,16 @@ Update the existing landing page copy to accurately describe Nemo:
 
 ```env
 # LLM
-ANTHROPIC_API_KEY=sk-ant-...
-NEMO_DEFAULT_MODEL=claude-sonnet-4-20250514
+OPENAI_API_KEY=sk-...
+NEMO_DEFAULT_MODEL=gpt-5-mini
 
 # Supabase
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 
-# Execution
-NEMO_PYTHON_PATH=/usr/bin/python3
-NEMO_EXEC_TIMEOUT=30000
-NEMO_DATA_DIR=./data
+# SQL Execution
+NEMO_SQL_TIMEOUT=15000       # statement_timeout in ms
+NEMO_SQL_MAX_ROWS=1000       # default LIMIT for queries
 
 # Engine defaults
 NEMO_MAX_NODES=50
@@ -1084,22 +1161,22 @@ NEMO_REFLECT_EVERY=5
 | `app/pages/sessions/new.vue` | 1 (stub) | ⬜ | New session setup |
 | `app/pages/sessions/[id].vue` | 1 (stub) | ⬜ | Session view |
 | `app/pages/datasets.vue` | 1 (stub) | ⬜ | Dataset library |
-| `server/core/llm.ts` | 2 | ⬜ | Claude API wrapper |
+| `server/core/llm.ts` | 2 | ⬜ | OpenAI Responses API wrapper |
 | `server/core/prompts.ts` | 2 | ⬜ | LLM prompt templates |
-| `server/core/executor.ts` | 2 | ⬜ | Python execution sandbox |
-| `server/core/executor_wrapper.py` | 2 | ⬜ | Python harness script |
-| `server/core/graph.ts` | 2 | ⬜ | Graph store (nodes, edges, frontier) |
-| `server/core/frontier.ts` | 2 | ⬜ | Priority scoring |
-| `server/core/engine.ts` | 2 | ⬜ | The outer exploration loop |
-| `server/api/sessions/index.post.ts` | 3 | ⬜ | Create session |
-| `server/api/sessions/index.get.ts` | 3 | ⬜ | List sessions |
-| `server/api/sessions/[id].get.ts` | 3 | ⬜ | Get session + graph |
-| `server/api/sessions/[id]/dive.post.ts` | 3 | ⬜ | Start exploration |
-| `server/api/sessions/[id]/pause.post.ts` | 3 | ⬜ | Pause engine |
-| `server/api/sessions/[id]/resume.post.ts` | 3 | ⬜ | Resume engine |
-| `server/api/sessions/[id]/stream.get.ts` | 3 | ⬜ | SSE event stream |
-| `server/services/session.ts` | 3 | ⬜ | Session manager (engine ↔ SSE glue) |
-| `app/composables/useSession.ts` | 3 | ⬜ | Reactive SSE consumer |
+| `server/core/executor.ts` | 2 | [✅ Completed] | DuckDB executor (CSV queries via read_csv_auto) |
+| `server/core/chartRenderer.ts` | 2 | [✅ Completed] | Server-side chart image generation |
+| `server/core/graph.ts` | 2 | [✅ Completed] | Graph store (nodes, edges, frontier) |
+| `server/core/frontier.ts` | 2 | [✅ Completed] | Priority scoring |
+| `server/core/engine.ts` | 2 | [✅ Completed] | The outer exploration loop |
+| `server/api/sessions/index.post.ts` | 3 | [✅ Completed] | Create session |
+| `server/api/sessions/index.get.ts` | 3 | [✅ Completed] | List sessions |
+| `server/api/sessions/[id].get.ts` | 3 | [✅ Completed] | Get session + graph |
+| `server/api/sessions/[id]/dive.post.ts` | 3 | [✅ Completed] | Start exploration |
+| `server/api/sessions/[id]/pause.post.ts` | 3 | [✅ Completed] | Pause engine |
+| `server/api/sessions/[id]/resume.post.ts` | 3 | [✅ Completed] | Resume engine |
+| `server/api/sessions/[id]/stream.get.ts` | 3 | [✅ Completed] | SSE event stream |
+| `server/services/session.ts` | 3 | [✅ Completed] | Session manager (engine ↔ SSE glue) |
+| `app/composables/useSession.ts` | 3 | [✅ Completed] | Reactive SSE consumer |
 | `app/pages/sessions/[id].vue` | 4 | ⬜ | Session view (full implementation) |
 | `app/components/graph/ExplorationGraph.vue` | 4 | ⬜ | D3 force-directed graph |
 | `app/components/graph/GraphNode.vue` | 4 | ⬜ | Node rendering |
