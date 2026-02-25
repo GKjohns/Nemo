@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pynemo"
+version = "0.1.0"
+description = "Nemo — local-first AI data exploration agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb",
+    "openai",
+    "pydantic",
+    "rich",
+    "tomli-w",
+    "typer[all]",
+]
+
+[project.scripts]
+nemo = "nemo.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["nemo*"]
+
+[tool.setuptools.package-data]
+nemo = ["store/schema.sql"]

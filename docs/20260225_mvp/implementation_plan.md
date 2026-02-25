@@ -88,11 +88,11 @@ These patterns don't change Nemo's core graph exploration paradigm. They improve
 
 ---
 
-## Sprint 1: Project Scaffold + Storage Layer
+## Sprint 1: Project Scaffold + Storage Layer [✅ Completed]
 
 Set up the Python package, CLI entrypoint, DuckDB system tables, config parsing, and the `nemo init` command. Everything subsequent builds on this foundation.
 
-### 1.1 Package Structure + Dependencies
+### 1.1 Package Structure + Dependencies [✅ Completed]
 
 **File:** `pyproject.toml`
 
@@ -493,15 +493,15 @@ def doctor():
 ```
 
 ### Sprint 1 Deliverables
-- [ ] `pyproject.toml` with all dependencies, `nemo` script entrypoint
-- [ ] Full package directory structure created (including `.nemo/generators/` and `.nemo/hooks/`)
-- [ ] DuckDB system tables defined in `schema.sql` (7 tables including `learnings`)
-- [ ] `NemoStore` class connects to DuckDB and applies schema
-- [ ] `NemoConfig` dataclass parses `nemo.toml` with sensible defaults (including hooks + verbosity)
-- [ ] `nemo init` creates `nemo.duckdb` + `nemo.toml` + `.nemo/` directory
-- [ ] `nemo doctor` runs health checks and reports status
-- [ ] All other CLI commands stubbed (raise `NotImplementedError` or print "coming soon")
-- [ ] `tests/test_store.py` — store initializes, inserts, and queries all system tables including `learnings`
+- [x] `pyproject.toml` with all dependencies, `nemo` script entrypoint
+- [x] Full package directory structure created (including `.nemo/generators/` and `.nemo/hooks/`)
+- [x] DuckDB system tables defined in `schema.sql` (7 tables including `learnings`)
+- [x] `NemoStore` class connects to DuckDB and applies schema
+- [x] `NemoConfig` dataclass parses `nemo.toml` with sensible defaults (including hooks + verbosity)
+- [x] `nemo init` creates `nemo.duckdb` + `nemo.toml` + `.nemo/` directory
+- [x] `nemo doctor` runs health checks and reports status
+- [x] All other CLI commands stubbed (raise `NotImplementedError` or print "coming soon")
+- [x] `tests/test_store.py` — store initializes, inserts, and queries all system tables including `learnings`
 
 ---
 
