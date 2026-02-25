@@ -651,11 +651,11 @@ def add(
 
 ---
 
-## Sprint 3: Planner — Generators, Scoring, Scheduling
+## Sprint 3: Planner — Generators, Scoring, Scheduling [✅ Completed]
 
 Build the frontier system: generators propose experiments, deduplication filters noise, scoring ranks by utility, and the scheduler picks the next action. After this sprint the planner can produce a prioritized queue of actions from any dataset state.
 
-### 3.1 Frontier Item Model
+### 3.1 Frontier Item Model [✅ Completed]
 
 Use Pydantic models for frontier items:
 
@@ -675,7 +675,7 @@ class FrontierItem(BaseModel):
     rationale: str = ""           # Why this action was proposed
 ```
 
-### 3.2 Frontier Generators
+### 3.2 Frontier Generators [✅ Completed]
 
 **File:** `nemo/planner/generators.py`
 
@@ -732,7 +732,7 @@ def run_generators(ctx: GeneratorContext) -> list[FrontierItem]:
 
 Generators are deterministic given the same state — they propose actions based on schema structure, column types, and gaps in existing insights. No LLM calls in the generator phase.
 
-### 3.3 Custom Generator Loading (Plugin System)
+### 3.3 Custom Generator Loading (Plugin System) [✅ Completed]
 
 **File:** `nemo/planner/loader.py`
 
@@ -774,7 +774,7 @@ def generate(ctx: GeneratorContext) -> list[FrontierItem]:
     return items
 ```
 
-### 3.4 Deduplication
+### 3.4 Deduplication [✅ Completed]
 
 **File:** `nemo/planner/dedupe.py`
 
@@ -794,7 +794,7 @@ def dedupe_frontier(
     """
 ```
 
-### 3.5 Scoring Function
+### 3.5 Scoring Function [✅ Completed]
 
 **File:** `nemo/planner/scoring.py`
 
@@ -828,7 +828,7 @@ def score_frontier(items: list[FrontierItem], ctx: GeneratorContext) -> list[Fro
     """Score all items, sort descending, and return."""
 ```
 
-### 3.6 Scheduler + Saturation Detection
+### 3.6 Scheduler + Saturation Detection [✅ Completed]
 
 **File:** `nemo/planner/scheduler.py`
 
@@ -864,7 +864,7 @@ def is_saturated(store: NemoStore, config: NemoConfig) -> bool:
     """
 ```
 
-### Sprint 3 Deliverables
+### Sprint 3 Deliverables [✅ Completed]
 - [x] `FrontierItem` Pydantic model with all fields and serialization
 - [x] 11 generators implemented, each emitting typed `FrontierItem`s with dedupe keys
 - [x] Generators cover: schema, trends, changepoints, segments, top groups, outliers, correlations, data quality, coverage, robustness, contradiction resolution
@@ -879,11 +879,11 @@ def is_saturated(store: NemoStore, config: NemoConfig) -> bool:
 
 ---
 
-## Sprint 4: Executor + Insight Writer + Evidence Graph + Outer Loop
+## Sprint 4: Executor + Insight Writer + Evidence Graph + Outer Loop [✅ Completed]
 
 The heart of Nemo. Compile frontier actions into SQL, execute against DuckDB, summarize results into insight nodes via LLM, link insights into the evidence graph, and wire it all into the `nemo run` outer loop.
 
-### 4.1 Action → SQL Compiler
+### 4.1 Action → SQL Compiler [✅ Completed]
 
 **File:** `nemo/executor/compile.py`
 
@@ -915,7 +915,7 @@ SQL rules:
 - Include comments with action_id for traceability
 - Use joins only when `join_confidence >= threshold`
 
-### 4.2 Query Executor
+### 4.2 Query Executor [✅ Completed]
 
 **File:** `nemo/executor/run.py`
 
@@ -942,7 +942,7 @@ def execute_query(store: NemoStore, sql: str, config: NemoConfig) -> ExecutionRe
     """
 ```
 
-### 4.3 LLM Summarizer
+### 4.3 LLM Summarizer [✅ Completed]
 
 **File:** `nemo/summarize/summarize.py`
 
@@ -981,7 +981,7 @@ async def summarize_result(
     """
 ```
 
-### 4.4 Canonicalization
+### 4.4 Canonicalization [✅ Completed]
 
 **File:** `nemo/summarize/canonicalize.py`
 
@@ -1005,7 +1005,7 @@ def canonicalize_hypothesis(question: str, config: NemoConfig) -> dict:
     """LLM call to extract structured hypothesis fields."""
 ```
 
-### 4.5 Evidence Graph Linker
+### 4.5 Evidence Graph Linker [✅ Completed]
 
 **File:** `nemo/graph/link.py`
 
@@ -1045,7 +1045,7 @@ def find_contradiction_clusters(store: NemoStore) -> list[dict]:
     """
 ```
 
-### 4.6 Working Memory Loader
+### 4.6 Working Memory Loader [✅ Completed]
 
 **File:** `nemo/engine.py` (module-level helper used by `NemoEngine`)
 
@@ -1066,7 +1066,7 @@ def load_working_memory(store: NemoStore, config: NemoConfig, run_id: str) -> di
 
 The **error pattern tracking** is inspired by the Ralph Wiggum autonomous loop pattern: failures are data. When a query fails or produces an error, the error context is included in working memory so the LLM and generators can avoid repeating the same mistake. For example, if a `SEGMENT_COMPARE` on `comment` fails because it's free-text with too many unique values, that pattern is recorded and subsequent generators will deprioritize free-text columns.
 
-### 4.7 Event Bus + Event Types
+### 4.7 Event Bus + Event Types [✅ Completed]
 
 **File:** `nemo/events.py`
 
@@ -1192,7 +1192,7 @@ class EventBus:
 
 The `insight:created` and `edge:created` events carry **complete representations** — everything needed to render a node or edge in a frontend graph without additional API calls. This is intentional: a future SSE/WebSocket subscriber can forward these directly to a browser client that builds the graph incrementally.
 
-### 4.8 User Hook Subscriber
+### 4.8 User Hook Subscriber [✅ Completed]
 
 **File:** `nemo/hooks.py`
 
@@ -1276,7 +1276,7 @@ event = json.load(sys.stdin)
 httpx.post("http://localhost:3000/api/nemo/events", json=event)
 ```
 
-### 4.9 Rich Display Subscriber
+### 4.9 Rich Display Subscriber [✅ Completed]
 
 **File:** `nemo/display.py`
 
@@ -1318,7 +1318,7 @@ class DisplaySubscriber:
         """Final Rich table with run statistics."""
 ```
 
-### 4.10 The Outer Loop — `nemo run`
+### 4.10 The Outer Loop — `nemo run` [✅ Completed]
 
 **File:** `nemo/cli.py` (update) + orchestration in `nemo/engine.py`
 
@@ -1452,7 +1452,7 @@ $ nemo run --plan
   Run `nemo run --minutes 20` to execute.
 ```
 
-### 4.11 Run Persistence + Resume
+### 4.11 Run Persistence + Resume [✅ Completed]
 
 The `runs` table tracks every run. Frontier items persist their status so a stopped run can be resumed without repeating work. Inspired by Claude Code's `/resume` which lets you pick up any prior session.
 
@@ -1494,34 +1494,34 @@ def status():
 
 Quick dashboard of the project state — datasets loaded, latest run info, total insights, frontier size, contradiction count.
 
-### Sprint 4 Deliverables
-- [ ] `EventBus` with typed `NemoEvent`s and subscriber protocol
-- [ ] All 17 event types defined with documented payload schemas
-- [ ] `DisplaySubscriber` renders events as Rich terminal output (normal/verbose/quiet)
-- [ ] `UserHookSubscriber` routes events to shell commands per `nemo.toml` config
-- [ ] Hook exit code 2 on `step:started` blocks that step (pre-execute guard)
-- [ ] `insight:created` and `edge:created` events carry full entity representations
-- [ ] Engine emits events at every phase — never prints or writes to stdout directly
-- [ ] SQL compiler produces correct SELECT queries for all 11 action types
-- [ ] Executor runs SQL safely (SELECT-only enforcement, timeout, timing capture)
-- [ ] LLM summarizer converts execution results into structured `InsightDraft`s
-- [ ] Canonicalization extracts structured claim/hypothesis JSON
-- [ ] Graph linker creates supports/contradicts/refines edges with rationale
-- [ ] Contradiction cluster detection groups connected contradictions
-- [ ] Working memory loader builds iteration context (including error patterns + learnings)
-- [ ] `nemo run --steps 10` executes 10 steps of the outer loop end-to-end
-- [ ] `nemo run --minutes 5` respects time budget
-- [ ] `nemo run --plan` shows scored frontier without executing
-- [ ] `nemo run --verbose` shows full SQL + results; `--quiet` suppresses step output
-- [ ] Saturation detection stops the loop when frontier scores drop below threshold
-- [ ] Self-correction: query errors feed back into working memory
-- [ ] `nemo resume` lists recent runs and continues from persisted frontier
-- [ ] `nemo status` shows project dashboard
-- [ ] SIGINT/SIGTERM gracefully finishes current step, emits `run:interrupted`, persists state
-- [ ] `tests/test_events.py` — event bus dispatches, subscriber filtering, payload validation
-- [ ] `tests/test_executor.py` — SQL compilation and execution for each action type
-- [ ] `tests/test_summarize.py` — LLM summarizer produces valid InsightDrafts (mock LLM)
-- [ ] `tests/test_graph.py` — linker creates correct edge types, contradiction clusters detected
+### Sprint 4 Deliverables [✅ Completed]
+- [x] `EventBus` with typed `NemoEvent`s and subscriber protocol
+- [x] All 17 event types defined with documented payload schemas
+- [x] `DisplaySubscriber` renders events as Rich terminal output (normal/verbose/quiet)
+- [x] `UserHookSubscriber` routes events to shell commands per `nemo.toml` config
+- [x] Hook exit code 2 on `step:started` blocks that step (pre-execute guard)
+- [x] `insight:created` and `edge:created` events carry full entity representations
+- [x] Engine emits events at every phase — never prints or writes to stdout directly
+- [x] SQL compiler produces correct SELECT queries for all 11 action types
+- [x] Executor runs SQL safely (SELECT-only enforcement, timeout, timing capture)
+- [x] LLM summarizer converts execution results into structured `InsightDraft`s
+- [x] Canonicalization extracts structured claim/hypothesis JSON
+- [x] Graph linker creates supports/contradicts/refines edges with rationale
+- [x] Contradiction cluster detection groups connected contradictions
+- [x] Working memory loader builds iteration context (including error patterns + learnings)
+- [x] `nemo run --steps 10` executes 10 steps of the outer loop end-to-end
+- [x] `nemo run --minutes 5` respects time budget
+- [x] `nemo run --plan` shows scored frontier without executing
+- [x] `nemo run --verbose` shows full SQL + results; `--quiet` suppresses step output
+- [x] Saturation detection stops the loop when frontier scores drop below threshold
+- [x] Self-correction: query errors feed back into working memory
+- [x] `nemo resume` lists recent runs and continues from persisted frontier
+- [x] `nemo status` shows project dashboard
+- [x] SIGINT/SIGTERM gracefully finishes current step, emits `run:interrupted`, persists state
+- [x] `tests/test_events.py` — event bus dispatches, subscriber filtering, payload validation
+- [x] `tests/test_executor.py` — SQL compilation and execution for each action type
+- [x] `tests/test_summarize.py` — LLM summarizer produces valid InsightDrafts (mock LLM)
+- [x] `tests/test_graph.py` — linker creates correct edge types, contradiction clusters detected
 
 ---
 
