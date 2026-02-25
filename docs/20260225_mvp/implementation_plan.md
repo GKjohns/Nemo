@@ -639,15 +639,15 @@ def add(
 ```
 
 ### Sprint 2 Deliverables
-- [ ] `nemo add path/to/file.csv --name mytable` loads CSV into DuckDB and records metadata
-- [ ] `nemo add path/to/*.parquet --name events` loads Parquet (glob support)
-- [ ] `nemo add --tpch --scale 1` generates TPC-H tables via DuckDB's `dbgen`
-- [ ] `nemo ls` lists all loaded datasets as a formatted table
-- [ ] `nemo schema <table>` shows columns and types
-- [ ] `nemo profile <table>` shows full column-level stats (nulls, distribution, samples)
-- [ ] Join discovery runs on all table pairs and produces ranked `JoinCandidate` list
-- [ ] `tests/test_ingest.py` — add CSV, add TPC-H, verify table creation and profiles
-- [ ] `tests/test_joins.py` — join discovery on TPC-H returns expected candidates (e.g., `orders.o_custkey → customer.c_custkey`)
+- [x] `nemo add path/to/file.csv --name mytable` loads CSV into DuckDB and records metadata
+- [x] `nemo add path/to/*.parquet --name events` loads Parquet (glob support)
+- [x] `nemo add --tpch --scale 1` generates TPC-H tables via DuckDB's `dbgen`
+- [x] `nemo ls` lists all loaded datasets as a formatted table
+- [x] `nemo schema <table>` shows columns and types
+- [x] `nemo profile <table>` shows full column-level stats (nulls, distribution, samples)
+- [x] Join discovery runs on all table pairs and produces ranked `JoinCandidate` list
+- [x] `tests/test_ingest.py` — add CSV, add TPC-H, verify table creation and profiles
+- [x] `tests/test_joins.py` — join discovery on TPC-H returns expected candidates (e.g., `orders.o_custkey → customer.c_custkey`)
 
 ---
 
