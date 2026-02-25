@@ -70,15 +70,26 @@ class NemoStore:
         thread_id: str | None = None,
         confidence: float = 0.5,
         status: str = "ok",
+        hypothesis_struct_json: str | dict[str, Any] | None = None,
+        result_sample_json: str | list[dict[str, Any]] | None = None,
+        claim_struct_json: str | dict[str, Any] | None = None,
+        effect_size: float | None = None,
+        coverage: float | None = None,
+        cost_ms: int | None = None,
+        source_tables_json: str | list[str] | None = None,
+        tags_json: str | list[str] | None = None,
+        error_text: str | None = None,
     ) -> str:
         insight_id = _new_id("insight")
         self.execute(
             """
             INSERT INTO insights (
-                insight_id, run_id, thread_id, title, question, sql,
-                result_summary_json, claim, confidence, status
+                insight_id, run_id, thread_id, title, question, hypothesis_struct_json,
+                sql, result_summary_json, result_sample_json, claim, claim_struct_json,
+                confidence, effect_size, coverage, cost_ms, source_tables_json, tags_json,
+                status, error_text
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 insight_id,
@@ -86,11 +97,20 @@ class NemoStore:
                 thread_id,
                 title,
                 question,
+                _json_or_none(hypothesis_struct_json),
                 sql,
                 _json_or_none(result_summary_json),
+                _json_or_none(result_sample_json),
                 claim,
+                _json_or_none(claim_struct_json),
                 confidence,
+                effect_size,
+                coverage,
+                cost_ms,
+                _json_or_none(source_tables_json),
+                _json_or_none(tags_json),
                 status,
+                error_text,
             ],
         )
         return insight_id
@@ -236,6 +256,90 @@ class NemoStore:
 
     def get_datasets(self) -> list[dict[str, Any]]:
         return self._query_dicts("SELECT * FROM datasets ORDER BY created_at DESC")
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._query_dicts("SELECT * FROM runs WHERE run_id = ? LIMIT 1", [run_id])
+        return rows[0] if rows else None
+
+    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self._query_dicts(
+            """
+            SELECT *
+            FROM runs
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            [limit],
+        )
+
+    def update_run(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        steps_completed: int | None = None,
+        insights_created: int | None = None,
+        errors: int | None = None,
+        frontier_size: int | None = None,
+        notes: str | None = None,
+        ended: bool = False,
+    ) -> None:
+        fields: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if steps_completed is not None:
+            fields.append("steps_completed = ?")
+            params.append(int(steps_completed))
+        if insights_created is not None:
+            fields.append("insights_created = ?")
+            params.append(int(insights_created))
+        if errors is not None:
+            fields.append("errors = ?")
+            params.append(int(errors))
+        if frontier_size is not None:
+            fields.append("frontier_size = ?")
+            params.append(int(frontier_size))
+        if notes is not None:
+            fields.append("notes = ?")
+            params.append(notes)
+        if ended:
+            fields.append("ended_at = now()")
+        if not fields:
+            return
+        params.append(run_id)
+        self.execute(f"UPDATE runs SET {', '.join(fields)} WHERE run_id = ?", params)
+
+    def get_frontier_existing_keys(self) -> set[str]:
+        rows = self.execute("SELECT dedupe_key FROM frontier").fetchall()
+        return {str(row[0]) for row in rows if row and row[0]}
+
+    def update_frontier_status(self, action_id: str, status: str, last_error: str | None = None) -> None:
+        self.execute(
+            """
+            UPDATE frontier
+            SET status = ?, last_error = ?
+            WHERE action_id = ?
+            """,
+            [status, last_error, action_id],
+        )
+
+    def get_insight_by_id(self, insight_id: str) -> dict[str, Any] | None:
+        rows = self._query_dicts("SELECT * FROM insights WHERE insight_id = ? LIMIT 1", [insight_id])
+        return rows[0] if rows else None
+
+    def get_edge_by_id(self, edge_id: str) -> dict[str, Any] | None:
+        rows = self._query_dicts("SELECT * FROM edges WHERE edge_id = ? LIMIT 1", [edge_id])
+        return rows[0] if rows else None
+
+    def count_frontier(self, status: str | None = None) -> int:
+        if status is None:
+            return int(self.execute("SELECT COUNT(*) FROM frontier").fetchone()[0])
+        return int(self.execute("SELECT COUNT(*) FROM frontier WHERE status = ?", [status]).fetchone()[0])
+
+    def count_contradictions(self) -> int:
+        return int(self.execute("SELECT COUNT(*) FROM edges WHERE type = 'contradicts'").fetchone()[0])
 
     def table_exists(self, table_name: str) -> bool:
         row = self.execute(

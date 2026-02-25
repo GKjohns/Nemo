@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import os
 from pathlib import Path
@@ -13,6 +14,10 @@ from rich.console import Console
 from rich.table import Table
 
 from nemo.config import NemoConfig, write_default_config
+from nemo.display import DisplaySubscriber
+from nemo.engine import NemoEngine
+from nemo.events import EventBus
+from nemo.hooks import UserHookSubscriber
 from nemo.ingest.add import add_file, add_glob, add_tpch
 from nemo.ingest.profile import profile_table
 from nemo.store.db import NemoStore, SYSTEM_TABLES
@@ -244,23 +249,110 @@ def profile(table_name: str = typer.Argument(..., help="Table name")) -> None:
 
 
 @app.command()
-def run() -> None:
-    _coming_soon("run")
+def run(
+    steps: int | None = typer.Option(None, "--steps", "-s", help="Max exploration steps"),
+    minutes: float | None = typer.Option(None, "--minutes", "-m", help="Max runtime in minutes"),
+    plan: bool = typer.Option(False, "--plan", help="Dry run: generate + score frontier only"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full phase output"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output"),
+) -> None:
+    """Run Nemo exploration loop."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        config = _load_config()
+        bus = EventBus()
+        bus.subscribe(DisplaySubscriber(verbose=verbose or config.verbose, quiet=quiet or config.quiet))
+        bus.subscribe(UserHookSubscriber(config))
+        engine = NemoEngine(store, config, bus)
+        run_id = asyncio.run(engine.run(max_steps=steps, max_minutes=minutes, plan_only=plan))
+        console.print(f"[green]run complete[/green] {run_id}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]run failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
-def resume() -> None:
-    _coming_soon("resume")
+def resume(
+    run_id: str | None = typer.Argument(None, help="Run ID to resume (omit to use most recent)"),
+    steps: int | None = typer.Option(None, "--steps", "-s"),
+    minutes: float | None = typer.Option(None, "--minutes", "-m"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+    quiet: bool = typer.Option(False, "--quiet", "-q"),
+) -> None:
+    """Resume an interrupted or completed run."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        config = _load_config()
+        if run_id is None:
+            runs = store.list_runs(limit=10)
+            if not runs:
+                raise RuntimeError("no runs available")
+            _print_recent_runs(runs)
+            selection = typer.prompt("Select a run to resume", default="1")
+            try:
+                idx = max(1, int(selection))
+            except ValueError:
+                idx = 1
+            idx = min(idx, len(runs))
+            run_id = str(runs[idx - 1]["run_id"])
+        if store.get_run(run_id) is None:
+            raise RuntimeError(f"run not found: {run_id}")
+        bus = EventBus()
+        bus.subscribe(DisplaySubscriber(verbose=verbose or config.verbose, quiet=quiet or config.quiet))
+        bus.subscribe(UserHookSubscriber(config))
+        engine = NemoEngine(store, config, bus)
+        resumed_id = asyncio.run(engine.run(max_steps=steps, max_minutes=minutes, resume_run_id=run_id))
+        console.print(f"[green]resumed[/green] {resumed_id}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]resume failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
 def status() -> None:
-    _coming_soon("status")
+    """Show current project dashboard."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        datasets = store.get_datasets()
+        latest = store.list_runs(limit=1)
+        latest_run = latest[0] if latest else None
+        table = Table(title="nemo status")
+        table.add_column("Metric")
+        table.add_column("Value")
+        table.add_row("datasets", str(len(datasets)))
+        table.add_row("insights", str(store.execute("SELECT COUNT(*) FROM insights").fetchone()[0]))
+        table.add_row("frontier queued", str(store.count_frontier(status="queued")))
+        table.add_row("contradictions", str(store.count_contradictions()))
+        if latest_run:
+            table.add_row("latest run", str(latest_run["run_id"]))
+            table.add_row("latest status", str(latest_run["status"]))
+            table.add_row("latest steps", str(latest_run["steps_completed"]))
+            table.add_row("latest insights", str(latest_run["insights_created"]))
+        console.print(table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]status failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
-def plan() -> None:
-    _coming_soon("plan")
+def plan(
+    steps: int | None = typer.Option(None, "--steps", "-s"),
+    minutes: float | None = typer.Option(None, "--minutes", "-m"),
+) -> None:
+    """Alias for `run --plan`."""
+    run(steps=steps, minutes=minutes, plan=True, verbose=False, quiet=False)
 
 
 @app.command()
@@ -293,6 +385,32 @@ def _open_store() -> NemoStore:
     if not db_path.exists():
         raise RuntimeError(f"missing {db_path}; run `nemo init` first")
     return NemoStore(db_path)
+
+
+def _load_config() -> NemoConfig:
+    return NemoConfig.load(Path(".").resolve() / "nemo.toml")
+
+
+def _print_recent_runs(runs: list[dict]) -> None:
+    table = Table(title="recent runs")
+    table.add_column("#", justify="right")
+    table.add_column("Run ID")
+    table.add_column("Status")
+    table.add_column("Started")
+    table.add_column("Steps", justify="right")
+    table.add_column("Insights", justify="right")
+    table.add_column("Frontier", justify="right")
+    for idx, run in enumerate(runs, start=1):
+        table.add_row(
+            str(idx),
+            str(run.get("run_id")),
+            str(run.get("status")),
+            str(run.get("started_at")),
+            str(run.get("steps_completed")),
+            str(run.get("insights_created")),
+            str(run.get("frontier_size")),
+        )
+    console.print(table)
 
 
 def _default_table_name(path: str) -> str:

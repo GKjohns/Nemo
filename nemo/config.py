@@ -28,7 +28,7 @@ class NemoConfig:
     weight_diversity: float = 0.1
 
     # LLM
-    model: str = "gpt-4.1-mini"
+    model: str = "gpt-5-mini"
     openai_api_key: str | None = None
 
     # Exploration
@@ -113,13 +113,18 @@ class NemoConfig:
 def write_default_config(path: Path) -> None:
     """Write a default nemo.toml file."""
     defaults = NemoConfig()
+    budget_payload: dict[str, Any] = {
+        "max_steps": defaults.max_steps,
+        "max_runtime_minutes": defaults.max_runtime_minutes,
+        "max_query_runtime_ms": defaults.max_query_runtime_ms,
+        "saturation_threshold": defaults.saturation_threshold,
+    }
+    if defaults.max_scan_rows is not None:
+        budget_payload["max_scan_rows"] = int(defaults.max_scan_rows)
+
     payload = {
         "budget": {
-            "max_steps": defaults.max_steps,
-            "max_runtime_minutes": defaults.max_runtime_minutes,
-            "max_query_runtime_ms": defaults.max_query_runtime_ms,
-            "max_scan_rows": defaults.max_scan_rows,
-            "saturation_threshold": defaults.saturation_threshold,
+            **budget_payload,
         },
         "scoring": {
             "weight_info_gain": defaults.weight_info_gain,
