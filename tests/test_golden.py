@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+from nemo.config import NemoConfig
+from nemo.engine import NemoEngine
+from nemo.events import EventBus
+from nemo.executor import execute_query
+from nemo.ingest.add import add_tpch
+from nemo.report import generate_brief_markdown
+from nemo.store import NemoStore
+
+
+def test_tpch_golden(project_dir: Path):
+    store = NemoStore(project_dir / "nemo.duckdb")
+    store.initialize()
+    try:
+        try:
+            add_tpch(store, scale=0.01)
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"tpch extension unavailable: {exc}")
+
+        config = NemoConfig(max_steps=15, max_runtime_minutes=10, max_scan_rows=200, max_query_runtime_ms=15000)
+        engine = NemoEngine(store, config, EventBus())
+        asyncio.run(engine.run(max_steps=15))
+
+        insight_rows = store.execute("SELECT insight_id, sql, claim, result_summary_json FROM insights").fetchall()
+        assert len(insight_rows) >= 10
+
+        edge_rows = store.execute("SELECT type FROM edges").fetchall()
+        edge_types = {str(row[0]) for row in edge_rows}
+        assert "supports" in edge_types
+        assert "contradicts" in edge_types
+        assert "refines" in edge_types
+
+        brief = generate_brief_markdown(store, top_n=10)
+        assert "## Top Insights" in brief
+        assert "## Contradictions" in brief
+        assert "## Coverage" in brief
+        assert "## Recommendations" in brief
+
+        forbidden = ("insert ", "update ", "delete ", "drop ", "create ", "alter ", "truncate ", "attach ", "copy ")
+        for insight_id, sql, claim, _ in insight_rows:
+            sql_text = str(sql or "").strip().lower()
+            claim_text = str(claim or "").strip()
+            assert sql_text
+            assert claim_text
+            assert sql_text.startswith("select") or sql_text.startswith("with") or sql_text.startswith("-- action_id:")
+            assert not any(token in sql_text for token in forbidden)
+            assert str(insight_id).strip()
+    finally:
+        store.close()
+
+
+def test_insight_reproducibility(project_dir: Path):
+    store = NemoStore(project_dir / "nemo.duckdb")
+    store.initialize()
+    try:
+        try:
+            add_tpch(store, scale=0.01)
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"tpch extension unavailable: {exc}")
+
+        config = NemoConfig(max_steps=12, max_runtime_minutes=10, max_scan_rows=200, max_query_runtime_ms=15000)
+        engine = NemoEngine(store, config, EventBus())
+        asyncio.run(engine.run(max_steps=12))
+
+        rows = store.execute("SELECT insight_id, sql, result_summary_json FROM insights ORDER BY created_at ASC").fetchall()
+        assert rows, "expected at least one insight"
+        for insight_id, sql, result_summary_json in rows:
+            sql_text = str(sql or "").strip()
+            assert sql_text, f"insight {insight_id} missing SQL"
+            rerun = execute_query(store, sql_text, config)
+            assert rerun.error is None, f"insight {insight_id} failed to re-execute: {rerun.error}"
+
+            expected_row_count = None
+            if isinstance(result_summary_json, str) and result_summary_json.strip():
+                try:
+                    summary = json.loads(result_summary_json)
+                except json.JSONDecodeError:
+                    summary = {}
+                if isinstance(summary, dict):
+                    expected_row_count = summary.get("row_count")
+            if expected_row_count is not None:
+                assert abs(int(rerun.row_count) - int(expected_row_count)) <= 0
+    finally:
+        store.close()

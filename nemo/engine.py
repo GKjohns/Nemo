@@ -11,7 +11,7 @@ from typing import Any
 from nemo.config import NemoConfig
 from nemo.events import EventBus, EventType, NemoEvent
 from nemo.executor import compile_action, execute_query
-from nemo.graph import find_contradiction_clusters, link_insight
+from nemo.graph import find_contradiction_clusters, link_insight, record_learnings, update_thread_cards
 from nemo.hooks import HookResult
 from nemo.ingest.joins import discover_joins
 from nemo.ingest.profile import profile_all
@@ -218,13 +218,23 @@ class NemoEngine:
                     if result.error:
                         errors += 1
                         self.store.update_frontier_status(item.action_id, "error", result.error)
+                        table_name = str(item.payload.get("table", ""))
+                        subject = f"{item.action_type}:{table_name}"
                         self.store.insert_learning(
                             run_id=run_id,
                             category="error_pattern",
-                            subject=f"{item.action_type}:{item.payload.get('table', '')}",
+                            subject=subject,
                             detail=result.error,
                             confidence=0.7,
                         )
+                        if "timeout" in result.error.lower():
+                            self.store.insert_learning(
+                                run_id=run_id,
+                                category="query_timeout",
+                                subject=subject,
+                                detail=result.error,
+                                confidence=0.8,
+                            )
                         await self.bus.emit(
                             NemoEvent(
                                 type=EventType.STEP_ERROR,
@@ -355,6 +365,13 @@ class NemoEngine:
                 except Exception as exc:  # noqa: BLE001
                     errors += 1
                     self.store.update_frontier_status(item.action_id, "error", str(exc))
+                    self.store.insert_learning(
+                        run_id=run_id,
+                        category="error_pattern",
+                        subject=f"{item.action_type}:{item.payload.get('table', '')}",
+                        detail=str(exc),
+                        confidence=0.7,
+                    )
                     await self.bus.emit(
                         NemoEvent(
                             type=EventType.STEP_ERROR,
@@ -364,17 +381,44 @@ class NemoEngine:
                         )
                     )
 
+            learning_ids: list[str] = []
+            thread_ids: list[str] = []
+            if self.config.use_learnings:
+                try:
+                    learning_ids = record_learnings(self.store, run_id)
+                except Exception:  # noqa: BLE001
+                    learning_ids = []
+            try:
+                thread_ids = update_thread_cards(self.store, self.config)
+            except Exception:  # noqa: BLE001
+                thread_ids = []
+
             stats = self._stats_payload(steps_done, insights_created, errors, started)
             if status == "interrupted":
                 await self.bus.emit(
                     NemoEvent(
                         type=EventType.RUN_INTERRUPTED,
                         run_id=run_id,
-                        payload={"reason": "signal", "stats": stats},
+                        payload={
+                            "reason": "signal",
+                            "stats": stats,
+                            "learnings_recorded": len(learning_ids),
+                            "thread_cards_updated": len(thread_ids),
+                        },
                     )
                 )
             else:
-                await self.bus.emit(NemoEvent(type=EventType.RUN_COMPLETED, run_id=run_id, payload={"stats": stats}))
+                await self.bus.emit(
+                    NemoEvent(
+                        type=EventType.RUN_COMPLETED,
+                        run_id=run_id,
+                        payload={
+                            "stats": stats,
+                            "learnings_recorded": len(learning_ids),
+                            "thread_cards_updated": len(thread_ids),
+                        },
+                    )
+                )
             self.store.update_run(
                 run_id,
                 status=status,
@@ -387,12 +431,28 @@ class NemoEngine:
             return run_id
         except KeyboardInterrupt:
             status = "interrupted"
+            learning_ids: list[str] = []
+            thread_ids: list[str] = []
+            if self.config.use_learnings:
+                try:
+                    learning_ids = record_learnings(self.store, run_id)
+                except Exception:  # noqa: BLE001
+                    learning_ids = []
+            try:
+                thread_ids = update_thread_cards(self.store, self.config)
+            except Exception:  # noqa: BLE001
+                thread_ids = []
             stats = self._stats_payload(steps_done, insights_created, errors, started)
             await self.bus.emit(
                 NemoEvent(
                     type=EventType.RUN_INTERRUPTED,
                     run_id=run_id,
-                    payload={"reason": "signal", "stats": stats},
+                    payload={
+                        "reason": "signal",
+                        "stats": stats,
+                        "learnings_recorded": len(learning_ids),
+                        "thread_cards_updated": len(thread_ids),
+                    },
                 )
             )
             self.store.update_run(

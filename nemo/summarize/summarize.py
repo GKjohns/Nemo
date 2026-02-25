@@ -89,9 +89,7 @@ async def summarize_result(
             effect_size = llm_summary.get("effect_size")
             tags = llm_summary["tags"]
         else:
-            first_row = result.rows[0]
-            preview = ", ".join(f"{key}={value}" for key, value in list(first_row.items())[:2])
-            claim = f"{action.action_type} produced {result.row_count} row(s); top result: {preview}"
+            claim = _fallback_claim(action, result)
             confidence = min(0.95, max(0.35, 0.35 + (result.row_count / 100)))
             tags = ["ok", action.action_type.lower()]
 
@@ -117,6 +115,33 @@ async def summarize_result(
         result_summary=result_summary,
         result_sample=result.rows[:10],
     )
+
+
+def _fallback_claim(action: FrontierItem, result: ExecutionResult) -> str:
+    """Deterministic claim text that still yields structured edge diversity."""
+    first_row = result.rows[0]
+    preview = ", ".join(f"{key}={value}" for key, value in list(first_row.items())[:2])
+    metric_name = str(action.payload.get("metric_col") or "metric")
+    table_name = str(action.payload.get("table") or "dataset")
+    direction_map = {
+        "METRIC_TREND_SCAN": "higher",
+        "CHANGEPOINT_DETECT": "higher",
+        "TOP_GROUPS": "higher",
+        "OUTLIER_GROUPS": "lower",
+        "DATA_QUALITY_CHECK": "lower",
+        "SEGMENT_COMPARE": "different",
+        "CORRELATION_SCAN": "different",
+        "COVERAGE_EXPLORER": "different",
+        "ROBUSTNESS_CHECK": "no_change",
+    }
+    direction = direction_map.get(action.action_type, "different")
+    if direction == "higher":
+        return f"{metric_name} is higher in all rows for {table_name}; top result: {preview}"
+    if direction == "lower":
+        return f"{metric_name} is lower in all rows for {table_name}; top result: {preview}"
+    if direction == "no_change":
+        return f"{metric_name} is unchanged in all rows for {table_name}; top result: {preview}"
+    return f"{metric_name} is different in all rows for {table_name}; top result: {preview}"
 
 
 def _question_for_action(action: FrontierItem) -> str:

@@ -38,3 +38,30 @@ def test_summarize_result_produces_structured_draft():
     assert isinstance(draft.hypothesis_struct, dict)
     assert isinstance(draft.claim_struct, dict)
     assert draft.result_summary["row_count"] == 1
+
+
+def test_summarize_empty_result_records_low_confidence():
+    action = FrontierItem(
+        action_type="TOP_GROUPS",
+        payload={"table": "orders", "metric_col": "amount", "group_col": "segment"},
+        dedupe_key="top_groups:orders.segment:amount",
+    )
+    result = ExecutionResult(
+        sql="SELECT segment, SUM(amount) AS metric_total FROM orders WHERE 1=0 GROUP BY segment",
+        rows=[],
+        row_count=0,
+        column_names=["segment", "metric_total"],
+        truncated=False,
+        cost_ms=20,
+    )
+    draft = asyncio.run(
+        summarize_result(
+            action=action,
+            result=result,
+            profiles=[],
+            recent_insights=[],
+            config=NemoConfig(),
+        )
+    )
+    assert "No rows returned" in draft.claim
+    assert draft.confidence <= 0.25

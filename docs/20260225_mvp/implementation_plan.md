@@ -1723,18 +1723,18 @@ def test_insight_reproducibility():
 - **Hook failures:** If a hook script fails, log the error but don't block the loop. Pre-execute hooks can block individual actions (exit code 2) but not the entire run.
 
 ### Sprint 5 Deliverables
-- [ ] `nemo brief` generates a markdown report with top insights, contradictions, coverage, and recommendations
-- [ ] `nemo report` writes brief to `reports/` directory
-- [ ] `nemo graph stats` shows node/edge counts, coverage, and avg confidence
-- [ ] `nemo graph contradictions --top N` shows top unresolved contradiction clusters
-- [ ] Cross-run learnings recorded after each run (join quality, noisy columns, generator hit rates)
-- [ ] Learnings recalled and incorporated in subsequent runs
-- [ ] Thread cards created for contradiction clusters (stub-level)
-- [ ] TPC-H quickstart example documented
-- [ ] Golden test: `nemo init → add --tpch → run --steps 15 → brief` passes with ≥10 insights
-- [ ] Reproducibility test: every insight's SQL re-executes successfully
-- [ ] Error handling: LLM retries, query timeouts, malformed SQL, empty results, hook failures
-- [ ] `README.md` with installation, quickstart, configuration reference, and custom generator docs
+- [x] `nemo brief` generates a markdown report with top insights, contradictions, coverage, and recommendations
+- [x] `nemo report` writes brief to `reports/` directory
+- [x] `nemo graph stats` shows node/edge counts, coverage, and avg confidence
+- [x] `nemo graph contradictions --top N` shows top unresolved contradiction clusters
+- [x] Cross-run learnings recorded after each run (join quality, noisy columns, generator hit rates)
+- [x] Learnings recalled and incorporated in subsequent runs
+- [x] Thread cards created for contradiction clusters (stub-level)
+- [x] TPC-H quickstart example documented
+- [x] Golden test: `nemo init → add --tpch → run --steps 15 → brief` passes with ≥10 insights
+- [x] Reproducibility test: every insight's SQL re-executes successfully
+- [x] Error handling: LLM retries, query timeouts, malformed SQL, empty results, hook failures
+- [x] `README.md` with installation, quickstart, configuration reference, and custom generator docs
 
 ---
 
@@ -1836,6 +1836,8 @@ def test_insight_reproducibility():
 ---
 
 ## Testing Strategy
+
+Test execution commands and environment setup live in `docs/testing.md` and should be used as the source of truth when running test suites.
 
 ### Unit Tests (per module)
 | Test File | Covers | Key Assertions |

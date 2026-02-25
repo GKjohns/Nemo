@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 
+from nemo.graph import recall_learnings
 from nemo.planner.models import FrontierItem
 
 
@@ -125,17 +126,17 @@ def _learning_adjustment(item: FrontierItem, learnings: list[dict]) -> float:
 
 
 def _load_learnings(ctx) -> list[dict]:
-    rows = ctx.store.execute(
-        """
-        SELECT subject, detail, confidence
-        FROM learnings
-        ORDER BY created_at DESC
-        LIMIT 100
-        """
-    ).fetchall()
-    if not rows:
-        return []
-    return [{"subject": row[0], "detail": row[1], "confidence": row[2]} for row in rows]
+    context = {
+        "tables": [profile.name for profile in ctx.profiles],
+        "columns": [column.name for profile in ctx.profiles for column in profile.columns],
+        "action_types": [
+            str(item.get("action_type") or "") for item in ctx.store.get_frontier_queue(status="queued", limit=50)
+        ],
+    }
+    rows = recall_learnings(ctx.store, context)
+    if rows:
+        return rows
+    return []
 
 
 def derive_recent_insight_keys(recent_insights: list[dict]) -> set[str]:

@@ -45,23 +45,27 @@ class UserHookSubscriber:
         return results
 
     async def _run_hook(self, command: str, event: NemoEvent) -> HookResult:
-        proc = await asyncio.create_subprocess_exec(
-            *shlex.split(command),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        payload = json.dumps(event.to_dict()).encode("utf-8")
-        stdout, stderr = await proc.communicate(input=payload)
-        code = int(proc.returncode or 0)
-        blocked = code == 2 and event.type == EventType.STEP_STARTED
-        return HookResult(
-            command=command,
-            exit_code=code,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
-            blocked=blocked,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *shlex.split(command),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            payload = json.dumps(event.to_dict()).encode("utf-8")
+            stdout, stderr = await proc.communicate(input=payload)
+            code = int(proc.returncode or 0)
+            blocked = code == 2 and event.type == EventType.STEP_STARTED
+            return HookResult(
+                command=command,
+                exit_code=code,
+                stdout=stdout.decode("utf-8", errors="replace"),
+                stderr=stderr.decode("utf-8", errors="replace"),
+                blocked=blocked,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Hook failures should be observable but must not crash the run loop.
+            return HookResult(command=command, exit_code=1, stdout="", stderr=str(exc), blocked=False)
 
     def _match_commands(self, event_type: EventType) -> list[str]:
         event_value = event_type.value

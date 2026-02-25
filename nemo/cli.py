@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import json
 import os
 from pathlib import Path
 from typing import Callable
@@ -17,9 +18,11 @@ from nemo.config import NemoConfig, write_default_config
 from nemo.display import DisplaySubscriber
 from nemo.engine import NemoEngine
 from nemo.events import EventBus
+from nemo.graph import find_contradiction_clusters
 from nemo.hooks import UserHookSubscriber
 from nemo.ingest.add import add_file, add_glob, add_tpch
 from nemo.ingest.profile import profile_table
+from nemo.report import generate_brief_markdown, write_brief_report
 from nemo.store.db import NemoStore, SYSTEM_TABLES
 
 app = typer.Typer(name="nemo", help="Nemo - local-first AI data exploration agent")
@@ -356,23 +359,120 @@ def plan(
 
 
 @app.command()
-def brief() -> None:
-    _coming_soon("brief")
+def brief(
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write markdown to file"),
+    top: int = typer.Option(10, "--top", "-n", help="Number of top insights to include"),
+) -> None:
+    """Generate a markdown brief from recent results."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        if output is not None:
+            out = write_brief_report(store, output, top_n=top)
+            console.print(f"[green]brief written[/green] {out}")
+            return
+        console.print(generate_brief_markdown(store, top_n=top))
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]brief failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
-def report() -> None:
-    _coming_soon("report")
+def report(
+    output_dir: Path = typer.Option(Path("reports"), "--output-dir", "-o", help="Output directory"),
+    top: int = typer.Option(10, "--top", "-n", help="Number of top insights to include"),
+) -> None:
+    """Write a markdown brief to reports/."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        latest_run = store.list_runs(limit=1)
+        suffix = "latest"
+        if latest_run:
+            suffix = str(latest_run[0].get("run_id", "latest"))
+        output_path = output_dir / f"brief_{suffix}.md"
+        out = write_brief_report(store, output_path, top_n=top)
+        console.print(f"[green]report written[/green] {out}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]report failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @graph_app.command()
 def stats() -> None:
-    _coming_soon("graph stats")
+    """Show evidence graph statistics."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        insights = int(store.execute("SELECT COUNT(*) FROM insights").fetchone()[0])
+        edges = int(store.execute("SELECT COUNT(*) FROM edges").fetchone()[0])
+        contradictions = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'contradicts'").fetchone()[0])
+        supports = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'supports'").fetchone()[0])
+        refines = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'refines'").fetchone()[0])
+        avg_conf = float(store.execute("SELECT AVG(confidence) FROM insights WHERE status = 'ok'").fetchone()[0] or 0.0)
+
+        datasets = [str(row[0]) for row in store.execute("SELECT name FROM datasets").fetchall()]
+        touched: set[str] = set()
+        for row in store.execute("SELECT source_tables_json FROM insights WHERE source_tables_json IS NOT NULL").fetchall():
+            touched.update(_json_list(row[0]))
+        coverage_ratio = (len(touched) / len(datasets)) if datasets else 0.0
+
+        table = Table(title="graph stats")
+        table.add_column("Metric")
+        table.add_column("Value")
+        table.add_row("insight nodes", str(insights))
+        table.add_row("edges", str(edges))
+        table.add_row("supports edges", str(supports))
+        table.add_row("contradicts edges", str(contradictions))
+        table.add_row("refines edges", str(refines))
+        table.add_row("avg confidence", f"{avg_conf:.3f}")
+        table.add_row("table coverage", f"{len(touched)}/{len(datasets)} ({coverage_ratio:.1%})")
+        console.print(table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]graph stats failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @graph_app.command()
-def contradictions() -> None:
-    _coming_soon("graph contradictions")
+def contradictions(top: int = typer.Option(10, "--top", "-n", help="Number of clusters to show")) -> None:
+    """Show top unresolved contradiction clusters."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        clusters = find_contradiction_clusters(store)
+        if not clusters:
+            console.print("[green]No contradiction clusters found.[/green]")
+            return
+        table = Table(title="graph contradictions")
+        table.add_column("#", justify="right")
+        table.add_column("Cluster Size", justify="right")
+        table.add_column("Insights")
+        table.add_column("Sample Claims")
+        for idx, cluster in enumerate(clusters[: max(1, int(top))], start=1):
+            insight_ids = [str(v) for v in cluster.get("insight_ids", [])]
+            claims = [str(v) for v in cluster.get("claims", [])]
+            table.add_row(
+                str(idx),
+                str(len(insight_ids)),
+                ", ".join(insight_ids[:4]) + ("..." if len(insight_ids) > 4 else ""),
+                " | ".join(claims[:2]) if claims else "-",
+            )
+        console.print(table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]graph contradictions failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 def _coming_soon(command_name: str) -> None:
@@ -422,6 +522,19 @@ def _default_table_name(path: str) -> str:
 
 def _quote_ident(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+
+def _json_list(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        return [str(v) for v in raw]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return [part.strip() for part in raw.split(",") if part.strip()]
+        if isinstance(parsed, list):
+            return [str(v) for v in parsed]
+    return []
 
 
 def _check_db_exists(db_path: Path) -> tuple[bool, str]:
