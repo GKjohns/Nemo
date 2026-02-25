@@ -32,6 +32,15 @@ app.add_typer(graph_app, name="graph")
 console = Console()
 
 
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Launch TUI when no subcommand is provided."""
+    if ctx.invoked_subcommand is None:
+        from nemo.tui.app import launch_tui
+
+        launch_tui()
+
+
 @app.command()
 def init(path: Path = typer.Argument(Path("."), help="Project directory")) -> None:
     """Initialize a new Nemo project."""
