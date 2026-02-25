@@ -1525,7 +1525,7 @@ Quick dashboard of the project state — datasets loaded, latest run info, total
 
 ---
 
-## Sprint 5: Reporting + Demo + Polish
+## Sprint 5: Reporting + Demo + Polish [✅ Completed]
 
 Generate the morning brief, expose graph inspection commands, run the TPC-H end-to-end demo, add thread card stubs, and harden with tests.
 
@@ -1738,7 +1738,421 @@ def test_insight_reproducibility():
 
 ---
 
-## Data Model Summary
+## Sprint 6 — Interactive TUI [✅ Completed]
+
+**Goal:** Type `nemo` with no arguments and land in an interactive dashboard. Browse datasets, kick off runs, read briefs, and explore the evidence graph from one prompt. If there's no project yet, the TUI bootstraps everything for you.
+
+> **Implementation note:** The original plan called for a Textual alternate-screen app. In practice, Textual's screen-takeover mode doesn't work in IDE terminals (Cursor, VS Code integrated terminal). The implementation uses a **Rich-based interactive REPL** instead — inline panels and tables printed to stdout with a `nemo>` prompt. All planned functionality is present; the UX is closer to Claude Code's terminal interface.
+
+### 6.1 Zero-Config Quick Start Flow
+
+When `nemo` is launched and no `nemo.duckdb` exists in the current directory, the TUI shows a **Welcome Screen** instead of the dashboard:
+
+```
+┌──────────────────────────────────────────────┐
+│            Welcome to Nemo                    │
+│                                               │
+│  No project found in this directory.          │
+│                                               │
+│  [Q] Quick start with TPC-H demo data        │
+│  [I] Initialize empty project                 │
+│  [O] Open existing project (pick directory)   │
+│                                               │
+│  Quick start will:                            │
+│    1. Initialize a new Nemo project here      │
+│    2. Load TPC-H demo tables (scale 0.01)     │
+│    3. Start a 15-step exploration run          │
+│    4. Drop you into the dashboard when done   │
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+**File:** `nemo/tui/screens/welcome.py`
+
+Pressing `Q` triggers the full bootstrap sequence in order:
+1. `nemo init` (create `nemo.duckdb`, `nemo.toml`, `.nemo/` dirs)
+2. `add_tpch(store, scale=0.01)` — load all 8 TPC-H tables
+3. Start a run via `NemoEngine.run(max_steps=15)` — shows live progress in the welcome screen
+4. On completion, auto-switch to the Dashboard tab with data populated
+
+This means the entire "install → first insight" path is: `pip install -e .` → `nemo` → press `Q` → wait ~10 seconds → browse results.
+
+Pressing `I` runs `nemo init` only and drops into the empty Dashboard (from there the user can add datasets via the Datasets tab). Pressing `O` opens a directory picker.
+
+If a project already exists (`nemo.duckdb` found), the TUI skips welcome and goes straight to Dashboard.
+
+### 6.2 Architecture
+
+The TUI is a **read/write shell** over the existing `NemoStore` and `NemoEngine`. It imports the same modules the CLI uses but renders into a Textual app instead of printing Rich tables.
+
+```
+nemo (no args)
+  └─ nemo/tui/app.py   ← Textual App
+       ├─ Sidebar       (datasets, runs, quick-actions)
+       ├─ DashboardTab  (status + live stats)
+       ├─ InsightsTab   (searchable table of insights)
+       ├─ GraphTab      (text-mode edge list + contradiction clusters)
+       ├─ BriefTab      (rendered markdown brief)
+       └─ RunPanel      (start/stop/resume with live event stream)
+```
+
+**Dependency:** `textual` — a modern Python TUI framework built on top of Rich (which we already use).
+
+### 6.3 Entry Point
+
+**File:** `nemo/tui/__init__.py`, `nemo/tui/app.py`
+
+When the user runs `nemo` with no subcommand, Typer invokes the default callback. If no subcommand is supplied, launch the TUI.
+
+```python
+# In nemo/cli.py — modify the app callback
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context):
+    if ctx.invoked_subcommand is None:
+        from nemo.tui.app import launch_tui
+        launch_tui()
+```
+
+On launch, the app checks for `nemo.duckdb` in the working directory:
+- **Not found:** show the Welcome Screen (§6.1) with quick-start / init / open options.
+- **Found:** open the store and go straight to Dashboard.
+
+### 6.4 Dashboard Screen
+
+**File:** `nemo/tui/screens/dashboard.py`
+
+Shows at a glance:
+- Project path and DuckDB file size
+- Dataset count with row totals
+- Latest run status, steps, insights, errors
+- Frontier queue size
+- Contradiction count
+- Learnings count
+
+All values fetched from `NemoStore` on mount and refreshable with `r`.
+
+### 6.5 Datasets Panel
+
+**File:** `nemo/tui/screens/datasets.py`
+
+- `DataTable` listing all datasets (name, rows, cols, format, added at)
+- Action bar: `a` to add a file (opens a path input), `t` to load TPC-H (prompts for scale), `p` to profile selected table
+- Profile overlay: renders the same column stats as `nemo profile` in a modal
+
+### 6.6 Insights Browser
+
+**File:** `nemo/tui/screens/insights.py`
+
+- Searchable `DataTable` with columns: ID, title, claim, confidence, tables, created_at
+- Sort by confidence or recency
+- Select a row to expand detail view: full SQL, result sample, edges, thread ID
+- `r` to re-execute the stored SQL and show reproducibility check inline
+
+### 6.7 Graph Explorer
+
+**File:** `nemo/tui/screens/graph.py`
+
+- Summary stats header (same as `nemo graph stats`)
+- Contradiction clusters listed as expandable tree nodes
+- Edge list: from → to, type, weight, rationale
+- Filter by edge type (supports / contradicts / refines / depends_on)
+
+### 6.8 Brief Viewer
+
+**File:** `nemo/tui/screens/brief.py`
+
+- Renders `generate_brief_markdown(store)` into a scrollable `Markdown` widget (Textual has built-in markdown rendering)
+- `s` to save to file (prompts for path, defaults to `reports/brief_<run_id>.md`)
+
+### 6.9 Run Controller
+
+**File:** `nemo/tui/screens/run.py`
+
+- Start a new run: configure steps/minutes via input fields, hit Enter
+- Engine runs in an asyncio background task
+- Live event stream rendered as a scrolling log (subscribes to `EventBus`)
+- Progress bar for steps completed / budget
+- `Ctrl+C` or `q` gracefully interrupts (same `KeyboardInterrupt` path the engine already handles)
+- Resume: pick from recent runs list
+
+### 6.10 Keybindings & Navigation
+
+| Key | Action |
+|-----|--------|
+| `1`–`5` or Tab | Switch tabs: Dashboard, Datasets, Insights, Graph, Brief |
+| `r` | Refresh current view / re-run query |
+| `n` | New run (from any tab) |
+| `a` | Add dataset (from Datasets tab) |
+| `t` | Load TPC-H |
+| `s` | Save brief to file |
+| `q` | Quit |
+| `/` | Search/filter (insights tab) |
+| `?` | Help overlay |
+
+### Sprint 6 Deliverables [✅ Completed]
+- [x] `nemo` with no subcommand launches the interactive REPL (Rich-based, not Textual — see note above)
+- [x] Welcome screen with Quick Start (`Q`), Init (`I`), and Open (`O`) options
+- [x] Quick Start: init → load TPC-H 0.01 → run 15 steps → land on dashboard (one keypress)
+- [x] Dashboard view shows project status at a glance
+- [x] Datasets view lists tables with add/profile actions
+- [x] Insights view with search/sort and detail expansion
+- [x] Graph view with stats, contradiction clusters, and edge browser
+- [x] Brief view renders markdown brief with save-to-file
+- [x] Run controller starts runs with live event stream
+- [x] Commands documented in help overlay (`?`)
+- [x] Unit tests for TUI data-fetching helpers (`tests/test_tui_data.py`)
+
+---
+
+## Sprint 7 — Web Dashboard (Nuxt + Nuxt UI)
+
+**Goal:** A local web dashboard at `http://localhost:3000` for richer exploration — sortable tables, an interactive evidence graph visualization, and a polished brief view. Backed by a lightweight FastAPI server that exposes the DuckDB store as a REST API.
+
+### 7.1 Architecture
+
+```
+nemo web                         # CLI command to launch both servers
+  ├─ nemo/server/main.py         # FastAPI JSON API  (port 8787)
+  │    └─ reads from nemo.duckdb
+  └─ web/                        # Nuxt 3 + Nuxt UI  (port 3000, proxies /api → 8787)
+       ├─ pages/
+       │    ├─ index.vue          # Dashboard
+       │    ├─ datasets.vue       # Dataset browser
+       │    ├─ insights.vue       # Insight table + detail drawer
+       │    ├─ graph.vue          # Evidence graph visualization
+       │    └─ brief.vue          # Morning brief markdown render
+       ├─ components/
+       │    ├─ InsightTable.vue
+       │    ├─ InsightDetail.vue
+       │    ├─ GraphCanvas.vue
+       │    ├─ ContradictionList.vue
+       │    ├─ RunController.vue
+       │    └─ StatusCard.vue
+       └─ composables/
+            └─ useNemoApi.ts      # Typed fetch wrapper for /api/*
+```
+
+### 7.2 Nuxt Project Setup
+
+Scaffolded via:
+
+```bash
+npm create nuxt@latest -- -t ui web
+```
+
+This installs Nuxt 3 with Nuxt UI pre-configured (components, color system, icons all ready).
+
+The `web/` directory lives at the repo root alongside `nemo/`. The Nuxt dev server proxies `/api` requests to the FastAPI backend.
+
+```typescript
+// web/nuxt.config.ts — dev proxy
+export default defineNuxtConfig({
+  devServer: { port: 3000 },
+  nitro: {
+    devProxy: {
+      '/api': { target: 'http://localhost:8787', changeOrigin: true }
+    }
+  }
+})
+```
+
+### 7.3 FastAPI Backend
+
+**File:** `nemo/server/main.py`
+
+A thin JSON API over `NemoStore`. No new logic — just serialization of what the CLI already queries.
+
+```python
+# Endpoints
+GET  /api/status              # dashboard stats (datasets, insights, edges, runs)
+GET  /api/datasets            # list datasets with row/col counts
+GET  /api/datasets/:name      # single dataset detail + column profile
+GET  /api/insights            # paginated insight list (?sort=confidence&limit=50&offset=0)
+GET  /api/insights/:id        # single insight with edges, SQL, result sample
+GET  /api/edges               # all edges (?type=contradicts)
+GET  /api/graph/stats         # node/edge counts, coverage, avg confidence
+GET  /api/graph/contradictions # contradiction clusters
+GET  /api/runs                # run history
+GET  /api/runs/:id            # single run detail
+GET  /api/brief               # generated markdown brief (as JSON { markdown: "..." })
+GET  /api/learnings           # cross-run learnings list
+GET  /api/threads             # thread cards
+
+POST /api/runs/start          # start a new run { max_steps, max_minutes }
+POST /api/runs/:id/stop       # gracefully stop a running run
+POST /api/datasets/add-tpch   # load TPC-H { scale }
+```
+
+**Dependencies:** `fastapi`, `uvicorn`
+
+### 7.4 CLI Integration
+
+**File:** `nemo/cli.py` — new `web` command
+
+```python
+@app.command()
+def web(
+    port: int = typer.Option(3000, "--port", "-p"),
+    api_port: int = typer.Option(8787, "--api-port"),
+):
+    """Launch the Nemo web dashboard."""
+    # 1. Start FastAPI in a background thread
+    # 2. Start Nuxt dev server (or serve built static files)
+    # 3. Open browser to http://localhost:{port}
+```
+
+For development: runs `nuxt dev` via subprocess.  
+For production: `nuxt build` outputs to `web/.output/`, served by FastAPI's `StaticFiles`.
+
+### 7.5 Dashboard Page (`pages/index.vue`)
+
+Grid of `StatusCard` components (using `UCard`):
+- Datasets loaded (count + total rows)
+- Insights created (count + avg confidence)
+- Evidence graph (nodes, edges, contradiction count)
+- Latest run (status, steps, duration)
+- Frontier queue size
+- Learnings recorded
+
+Quick-action buttons (using `UButton` with `primary`/`secondary` colors):
+- "Load TPC-H Demo" → POST `/api/datasets/add-tpch`
+- "Start Run" → opens modal with steps/minutes inputs → POST `/api/runs/start`
+- "View Brief" → navigates to `/brief`
+
+### 7.6 Datasets Page (`pages/datasets.vue`)
+
+- `UTable` with columns: name, rows, columns, format, source, added_at
+- Row click opens a slide-over (`USlideover`) with column profile (type, null%, distinct, min/max, quantiles)
+- "Add TPC-H" button in header
+
+### 7.7 Insights Page (`pages/insights.vue`)
+
+- `UTable` with sortable columns: title, claim, confidence, tables, created_at
+- Search input (`UInput`) filters by title/claim text
+- Confidence badge color: `success` >= 0.7, `warning` 0.4–0.7, `error` < 0.4
+- Row click opens detail drawer (`USlideover`):
+  - SQL (syntax-highlighted code block)
+  - Result sample as small `UTable`
+  - Edges list: linked insight IDs with type badges
+  - Thread ID link
+  - "Re-execute SQL" button to verify reproducibility
+
+### 7.8 Graph Page (`pages/graph.vue`)
+
+Two panels:
+
+**Left panel — Stats + Contradictions:**
+- Stats summary (same data as `nemo graph stats`) in a `UCard`
+- Contradiction clusters as `UAccordion` items, each showing member insight IDs and sample claims
+
+**Right panel — Edge browser:**
+- `UTable` of all edges: from → to, type, weight, rationale
+- Filter tabs by edge type using `UTabs` (All / Supports / Contradicts / Refines / Depends On)
+- Click an insight ID to navigate to its detail
+
+**Optional (stretch):** interactive force-directed graph using `d3-force` or `vis-network` in a `GraphCanvas.vue` component. Nodes = insights (sized by confidence), edges colored by type.
+
+### 7.9 Brief Page (`pages/brief.vue`)
+
+- Fetches `/api/brief` → renders the markdown string using `@nuxt/content` or a markdown renderer component
+- "Download as .md" button
+- "Regenerate" button to re-fetch
+
+### 7.10 Run Controller (`components/RunController.vue`)
+
+- Appears as a modal (`UModal`) triggered from dashboard or header
+- Form fields: max steps (`UInput` type=number), max minutes (`UInput` type=number)
+- Start button → POST `/api/runs/start`
+- While running: poll `/api/runs/:id` every 2s to update progress
+- Stop button → POST `/api/runs/:id/stop`
+- Status indicators using `UBadge` (running=`info`, completed=`success`, error=`error`, interrupted=`warning`)
+
+### 7.11 Shared Composable
+
+**File:** `web/composables/useNemoApi.ts`
+
+```typescript
+export const useNemoApi = () => {
+  const fetchApi = <T>(path: string, opts?: any) =>
+    $fetch<T>(`/api${path}`, opts)
+
+  return {
+    getStatus: () => fetchApi<DashboardStatus>('/status'),
+    getDatasets: () => fetchApi<Dataset[]>('/datasets'),
+    getInsights: (params?: InsightQuery) => fetchApi<Insight[]>('/insights', { params }),
+    getInsight: (id: string) => fetchApi<InsightDetail>(`/insights/${id}`),
+    getGraphStats: () => fetchApi<GraphStats>('/graph/stats'),
+    getContradictions: () => fetchApi<Cluster[]>('/graph/contradictions'),
+    getBrief: () => fetchApi<{ markdown: string }>('/brief'),
+    getRuns: () => fetchApi<Run[]>('/runs'),
+    startRun: (opts: RunOpts) => fetchApi<Run>('/runs/start', { method: 'POST', body: opts }),
+    stopRun: (id: string) => fetchApi<Run>(`/runs/${id}/stop`, { method: 'POST' }),
+    addTpch: (scale: number) => fetchApi('/datasets/add-tpch', { method: 'POST', body: { scale } }),
+  }
+}
+```
+
+### 7.12 Color & Theme
+
+All component colors use Nuxt UI's semantic tokens:
+- `primary` — main actions, active nav items
+- `secondary` — secondary buttons, info badges
+- `success` — high confidence, completed runs
+- `warning` — medium confidence, interrupted runs
+- `error` — low confidence, failed runs, contradiction badges
+- `info` — running state, neutral info
+- `neutral` — borders, muted text
+
+### Sprint 7 Deliverables
+- [ ] Nuxt project scaffolded via `npm create nuxt@latest -- -t ui web`
+- [ ] FastAPI backend with all endpoints listed in 7.3
+- [ ] `fastapi` + `uvicorn` added to Python dependencies
+- [ ] `nemo web` command launches API server + Nuxt dev server
+- [ ] Dashboard page with status cards and quick actions
+- [ ] Datasets page with table browser and profile slide-over
+- [ ] Insights page with sortable/searchable table and detail drawer
+- [ ] Graph page with stats, contradiction accordion, edge browser
+- [ ] Brief page with markdown render and download
+- [ ] Run controller modal with start/stop and polling progress
+- [ ] `useNemoApi` composable with typed endpoints
+- [ ] Nuxt proxy config routes `/api` to FastAPI
+- [ ] All Nuxt UI components use semantic color tokens (no raw color strings)
+
+---
+
+## Sprint 6 + 7 File Checklist
+
+| File | Sprint | Purpose |
+|------|--------|---------|
+| `nemo/tui/__init__.py` | 6 | TUI package |
+| `nemo/tui/app.py` | 6 | Textual app entrypoint + tab layout |
+| `nemo/tui/screens/welcome.py` | 6 | Welcome screen with quick-start bootstrap |
+| `nemo/tui/screens/dashboard.py` | 6 | Dashboard status screen |
+| `nemo/tui/screens/datasets.py` | 6 | Dataset browser + add/profile |
+| `nemo/tui/screens/insights.py` | 6 | Insight table + detail view |
+| `nemo/tui/screens/graph.py` | 6 | Graph stats + edge browser |
+| `nemo/tui/screens/brief.py` | 6 | Brief viewer with markdown |
+| `nemo/tui/screens/run.py` | 6 | Run start/stop/resume + live log |
+| `nemo/server/__init__.py` | 7 | Server package |
+| `nemo/server/main.py` | 7 | FastAPI app with all REST endpoints |
+| `web/` | 7 | Nuxt 3 + Nuxt UI project root |
+| `web/nuxt.config.ts` | 7 | Nuxt config with API proxy |
+| `web/pages/index.vue` | 7 | Dashboard page |
+| `web/pages/datasets.vue` | 7 | Dataset browser page |
+| `web/pages/insights.vue` | 7 | Insight browser page |
+| `web/pages/graph.vue` | 7 | Graph explorer page |
+| `web/pages/brief.vue` | 7 | Brief viewer page |
+| `web/components/StatusCard.vue` | 7 | Reusable stat card |
+| `web/components/InsightTable.vue` | 7 | Insight data table |
+| `web/components/InsightDetail.vue` | 7 | Insight detail slide-over |
+| `web/components/GraphCanvas.vue` | 7 | Optional graph visualization |
+| `web/components/ContradictionList.vue` | 7 | Contradiction cluster accordion |
+| `web/components/RunController.vue` | 7 | Run start/stop modal |
+| `web/composables/useNemoApi.ts` | 7 | Typed API fetch composable |
+| `tests/test_tui.py` | 6 | TUI data-fetching helper tests |
+| `tests/test_server.py` | 7 | FastAPI endpoint tests |
+
+---
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
