@@ -40,36 +40,36 @@ These patterns don't change Nemo's core graph exploration paradigm. They improve
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                         CLI (Typer)                           │
+│                         CLI (Typer)                          │
 │  nemo init · add · ls · profile · run · resume · brief       │
 │  nemo doctor · nemo graph stats · nemo graph contradictions  │
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
-│                      Outer Loop                               │
-│                                                               │
-│  ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Planner │→ │Executor │→ │Summarizer│→ │ Graph Linker  │  │
-│  │ (gen +  │  │ (compile│  │ (LLM →   │  │ (edges +      │  │
-│  │  score) │  │  + run) │  │  insight) │  │  contradictions│  │
-│  └─────────┘  └─────────┘  └──────────┘  └───────────────┘  │
-│       ↑            │             │              │             │
+│                      Outer Loop                              │
+│                                                              │
+│  ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌───────────────┐   │
+│  │ Planner │→ │Executor │→ │Summarizer│→ │ Graph Linker  │   │
+│  │ (gen +  │  │ (compile│  │ (LLM →   │  │ (edges +      │   │
+│  │  score) │  │  + run) │  │ insight) │  │ contradictions│   │
+│  └─────────┘  └─────────┘  └──────────┘  └───────────────┘   │
+│       ↑            │             │              │            │
 │  ┌────┴────────────┴─────────────┴──────────────┴─────────┐  │
-│  │ Event Bus (emit at every state transition)              │  │
-│  │ → run:* · frontier:* · step:* · insight:* · edge:* ...  │  │
+│  │ Event Bus (emit at every state transition)             │  │
+│  │ → run:* · frontier:* · step:* · insight:* · edge:* ... │  │
 │  └────┬────────────┬─────────────┬────────────────────────┘  │
-│       │            │             │                            │
-│  ┌────▼────┐  ┌────▼─────┐  ┌───▼──────────────────────┐    │
-│  │ Display │  │ User     │  │ Future: WebSocket/SSE,   │    │
-│  │ (Rich)  │  │ Hooks    │  │ Postgres, Supabase, etc. │    │
-│  └─────────┘  └──────────┘  └──────────────────────────┘    │
-│                                                               │
+│       │            │             │                           │
+│  ┌────▼────┐  ┌────▼─────┐  ┌──-─▼─────────────────────┐     │
+│  │ Display │  │ User     │  │ Future: WebSocket/SSE,   │     │
+│  │ (Rich)  │  │ Hooks    │  │ Postgres, Supabase, etc. │     │
+│  └─────────┘  └──────────┘  └──────────────────────────┘     │
+│                                                              │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ Working Memory: schema summary, recent insights,       │  │
 │  │ thread card, graph neighborhood, error patterns,       │  │
 │  │ cross-run learnings                                    │  │
 │  └────────────────────────────────────────────────────────┘  │
-│                                                               │
+│                                                              │
 │  ┌───────────────────────────────┐                           │
 │  │ Custom Generators (.nemo/gen/)│                           │
 │  │ Auto-discovered Python files  │                           │
@@ -78,10 +78,10 @@ These patterns don't change Nemo's core graph exploration paradigm. They improve
 └──────────────────────────┬───────────────────────────────────┘
                            │
 ┌──────────────────────────▼───────────────────────────────────┐
-│                     DuckDB (nemo.duckdb)                      │
-│                                                               │
+│                     DuckDB (nemo.duckdb)                     │
+│                                                              │
 │  System tables: datasets · insights · edges · frontier ·     │
-│                 runs · thread_cards · learnings               │
+│                 runs · thread_cards · learnings              │
 │  User tables:   loaded from CSV / Parquet / TPC-H            │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -865,17 +865,17 @@ def is_saturated(store: NemoStore, config: NemoConfig) -> bool:
 ```
 
 ### Sprint 3 Deliverables
-- [ ] `FrontierItem` Pydantic model with all fields and serialization
-- [ ] 11 generators implemented, each emitting typed `FrontierItem`s with dedupe keys
-- [ ] Generators cover: schema, trends, changepoints, segments, top groups, outliers, correlations, data quality, coverage, robustness, contradiction resolution
-- [ ] Custom generator loader discovers and validates `.nemo/generators/*.py` files
-- [ ] Dedupe removes duplicates against both queued and completed actions
-- [ ] Scoring function produces repeatable scores with configurable weights
-- [ ] Scoring incorporates cross-run learnings when available
-- [ ] Scheduler selects the top eligible action respecting budget constraints
-- [ ] Saturation detection recognizes when further exploration is low-value
-- [ ] Full pipeline: `run_generators → dedupe → score → select_next` works on TPC-H data
-- [ ] `tests/test_planner.py` — generators produce items, dedup reduces count, scoring is deterministic, scheduler respects budgets, saturation detects low-value states
+- [x] `FrontierItem` Pydantic model with all fields and serialization
+- [x] 11 generators implemented, each emitting typed `FrontierItem`s with dedupe keys
+- [x] Generators cover: schema, trends, changepoints, segments, top groups, outliers, correlations, data quality, coverage, robustness, contradiction resolution
+- [x] Custom generator loader discovers and validates `.nemo/generators/*.py` files
+- [x] Dedupe removes duplicates against both queued and completed actions
+- [x] Scoring function produces repeatable scores with configurable weights
+- [x] Scoring incorporates cross-run learnings when available
+- [x] Scheduler selects the top eligible action respecting budget constraints
+- [x] Saturation detection recognizes when further exploration is low-value
+- [x] Full pipeline: `run_generators → dedupe → score → select_next` works on TPC-H data
+- [x] `tests/test_planner.py` — generators produce items, dedup reduces count, scoring is deterministic, scheduler respects budgets, saturation detects low-value states
 
 ---
 

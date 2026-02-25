@@ -122,12 +122,17 @@ class NemoStore:
         thread_id: str | None = None,
         score: float = 0.0,
         status: str = "queued",
+        last_error: str | None = None,
+        depends_on_action_id: str | None = None,
     ) -> str:
         action_id = _new_id("action")
         self.execute(
             """
-            INSERT INTO frontier (action_id, run_id, thread_id, action_type, payload_json, score, status, dedupe_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO frontier (
+                action_id, run_id, thread_id, action_type, payload_json,
+                score, status, last_error, depends_on_action_id, dedupe_key
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 action_id,
@@ -137,6 +142,8 @@ class NemoStore:
                 _json_or_none(payload_json),
                 score,
                 status,
+                last_error,
+                depends_on_action_id,
                 dedupe_key,
             ],
         )
