@@ -13,6 +13,8 @@ from rich.console import Console
 from rich.table import Table
 
 from nemo.config import NemoConfig, write_default_config
+from nemo.ingest.add import add_file, add_glob, add_tpch
+from nemo.ingest.profile import profile_table
 from nemo.store.db import NemoStore, SYSTEM_TABLES
 
 app = typer.Typer(name="nemo", help="Nemo - local-first AI data exploration agent")
@@ -88,23 +90,157 @@ def doctor(path: Path = typer.Option(Path("."), "--path", help="Project director
 
 
 @app.command()
-def add() -> None:
-    _coming_soon("add")
+def add(
+    path: str | None = typer.Argument(None, help="Path to CSV/Parquet file or glob pattern"),
+    name: str | None = typer.Option(None, "--name", "-n", help="Table name"),
+    format: str = typer.Option("auto", "--format", "-f", help="File format: auto/csv/parquet"),
+    tpch: bool = typer.Option(False, "--tpch", help="Load TPC-H demo data"),
+    scale: float = typer.Option(1.0, "--scale", help="TPC-H scale factor"),
+) -> None:
+    """Add dataset(s) to the current project."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        if tpch:
+            dataset_ids = add_tpch(store, scale=scale)
+            console.print(f"[green]Loaded TPC-H tables:[/green] {len(dataset_ids)}")
+            return
+
+        if not path:
+            raise typer.BadParameter("path is required unless --tpch is provided")
+
+        table_name = name or _default_table_name(path)
+        if any(token in path for token in ["*", "?", "["]):
+            dataset_id = add_glob(store, pattern=path, name=table_name, format=format)
+        else:
+            dataset_id = add_file(store, path=Path(path), name=table_name, format=format)
+
+        console.print(f"[green]Added dataset:[/green] {table_name}")
+        console.print(f"dataset_id: [bold]{dataset_id}[/bold]")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]add failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
 def ls() -> None:
-    _coming_soon("ls")
+    """List loaded datasets."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        datasets = store.get_datasets()
+        if not datasets:
+            console.print("[yellow]No datasets loaded yet. Use `nemo add` first.[/yellow]")
+            return
+
+        table = Table(title="datasets")
+        table.add_column("Name")
+        table.add_column("Rows", justify="right")
+        table.add_column("Cols", justify="right")
+        table.add_column("Format")
+        table.add_column("Source")
+        table.add_column("Added At")
+
+        for dataset in datasets:
+            table_name = str(dataset["name"])
+            if not store.table_exists(table_name):
+                row_count = "n/a"
+                col_count = "n/a"
+            else:
+                safe_name = _quote_ident(table_name)
+                row_count = str(store.execute(f"SELECT COUNT(*) FROM {safe_name}").fetchone()[0])
+                col_count = str(store.execute(f"SELECT COUNT(*) FROM pragma_table_info({safe_name})").fetchone()[0])
+
+            table.add_row(
+                table_name,
+                row_count,
+                col_count,
+                str(dataset["format"]),
+                str(dataset["source_uri"]),
+                str(dataset["created_at"]),
+            )
+        console.print(table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]ls failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
-def schema() -> None:
-    _coming_soon("schema")
+def schema(table_name: str = typer.Argument(..., help="Table name")) -> None:
+    """Show schema for a table."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        if not store.table_exists(table_name):
+            raise ValueError(f"table not found: {table_name}")
+
+        safe_name = _quote_ident(table_name)
+        rows = store.execute(f"PRAGMA table_info({safe_name})").fetchall()
+        table = Table(title=f"schema: {table_name}")
+        table.add_column("Column")
+        table.add_column("Type")
+        table.add_column("Nullable")
+        table.add_column("Default")
+
+        for row in rows:
+            table.add_row(str(row[1]), str(row[2]), "yes" if not bool(row[3]) else "no", str(row[4] or ""))
+        console.print(table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]schema failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
-def profile() -> None:
-    _coming_soon("profile")
+def profile(table_name: str = typer.Argument(..., help="Table name")) -> None:
+    """Show a rich profile for a table."""
+    store: NemoStore | None = None
+    try:
+        store = _open_store()
+        table_profile = profile_table(store, table_name)
+        table = Table(title=f"profile: {table_profile.name} ({table_profile.row_count} rows)")
+        table.add_column("Column")
+        table.add_column("Type")
+        table.add_column("Null %", justify="right")
+        table.add_column("Distinct", justify="right")
+        table.add_column("Min/Max")
+        table.add_column("P25/P50/P75")
+        table.add_column("Samples")
+
+        for column in table_profile.columns:
+            min_max = "-"
+            if column.min_val is not None or column.max_val is not None:
+                min_max = f"{column.min_val} .. {column.max_val}"
+
+            quantiles = "-"
+            if column.p25 is not None or column.p50 is not None or column.p75 is not None:
+                quantiles = f"{column.p25} / {column.p50} / {column.p75}"
+
+            samples = ", ".join(str(sample) for sample in column.sample_values) if column.sample_values else "-"
+            table.add_row(
+                column.name,
+                column.dtype,
+                f"{column.null_pct:.2%}",
+                str(column.distinct_count),
+                min_max,
+                quantiles,
+                samples,
+            )
+        console.print(table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]profile failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()
@@ -150,6 +286,24 @@ def contradictions() -> None:
 def _coming_soon(command_name: str) -> None:
     console.print(f"[yellow]{command_name}[/yellow] is coming soon in a later sprint.")
     raise typer.Exit(code=0)
+
+
+def _open_store() -> NemoStore:
+    db_path = Path(".").resolve() / "nemo.duckdb"
+    if not db_path.exists():
+        raise RuntimeError(f"missing {db_path}; run `nemo init` first")
+    return NemoStore(db_path)
+
+
+def _default_table_name(path: str) -> str:
+    leaf = Path(path).stem
+    if leaf and leaf not in {"*", "."}:
+        return leaf
+    return "dataset"
+
+
+def _quote_ident(identifier: str) -> str:
+    return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
 
 def _check_db_exists(db_path: Path) -> tuple[bool, str]:
