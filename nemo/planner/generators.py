@@ -249,7 +249,7 @@ def run_generators(ctx: GeneratorContext) -> list[FrontierItem]:
 
 
 def _numeric_columns(profile: TableProfile) -> list[ColumnProfile]:
-    return [col for col in profile.columns if _is_numeric(col)]
+    return [col for col in profile.columns if _is_numeric(col) and not _is_surrogate_key(col, profile)]
 
 
 def _time_columns(profile: TableProfile, configured_time_columns: set[str]) -> list[ColumnProfile]:
@@ -278,6 +278,7 @@ def _categorical_columns(profile: TableProfile) -> list[ColumnProfile]:
         for col in profile.columns
         if not _is_numeric(col)
         and not _is_temporal(col)
+        and not _is_free_text(col)
         and (col.distinct_count <= 50 or col.cardinality_ratio <= 0.2)
     ]
 
@@ -290,6 +291,48 @@ def _is_numeric(col: ColumnProfile) -> bool:
 def _is_temporal(col: ColumnProfile) -> bool:
     dtype = col.dtype.lower()
     return "date" in dtype or "time" in dtype
+
+
+def _is_surrogate_key(col: ColumnProfile, profile: TableProfile) -> bool:
+    """Detect columns that are likely surrogate/primary keys (not meaningful metrics).
+
+    Heuristics: named like a key, sequential integers, or near-unique cardinality.
+    """
+    name_lower = col.name.lower()
+    if name_lower.endswith("key") or name_lower.endswith("_id") or name_lower == "id":
+        return True
+    if name_lower.endswith("_sk") or name_lower.endswith("_pk"):
+        return True
+    if profile.row_count > 0 and col.distinct_count == profile.row_count:
+        return True
+    if (
+        profile.row_count > 1
+        and col.min_val is not None
+        and col.max_val is not None
+        and isinstance(col.min_val, (int, float))
+        and isinstance(col.max_val, (int, float))
+    ):
+        expected_range = profile.row_count - 1
+        actual_range = col.max_val - col.min_val
+        if expected_range > 0 and actual_range == expected_range and col.distinct_count == profile.row_count:
+            return True
+    return False
+
+
+def _is_free_text(col: ColumnProfile) -> bool:
+    """Detect columns that are likely free-text (comments, descriptions, notes).
+
+    These are poor grouping dimensions because each value is near-unique prose.
+    """
+    name_lower = col.name.lower()
+    text_signals = ("comment", "description", "desc", "note", "notes", "memo", "text", "body", "message", "remark")
+    if any(signal in name_lower for signal in text_signals):
+        return True
+    if col.sample_values:
+        avg_len = sum(len(str(v)) for v in col.sample_values) / len(col.sample_values)
+        if avg_len > 40 and col.cardinality_ratio > 0.5:
+            return True
+    return False
 
 
 def _table_from_insight(insight: dict) -> str | None:

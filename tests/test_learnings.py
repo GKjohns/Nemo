@@ -70,3 +70,36 @@ def test_update_thread_cards_creates_contradiction_threads(store):
     assert updated
     count = store.execute("SELECT COUNT(*) FROM thread_cards").fetchone()[0]
     assert int(count) >= 1
+
+
+def test_update_thread_cards_creates_theme_threads(store):
+    run_id = store.insert_run(config_json={"max_steps": 5}, status="completed")
+    store.insert_insight(
+        title="theme-a",
+        question="q1",
+        sql="SELECT 1",
+        result_summary_json={"ok": True},
+        claim="claim one",
+        run_id=run_id,
+        confidence=0.8,
+        thread_id="Monthly revenue & order dynamics",
+    )
+    store.insert_insight(
+        title="theme-b",
+        question="q2",
+        sql="SELECT 1",
+        result_summary_json={"ok": True},
+        claim="claim two",
+        run_id=run_id,
+        confidence=0.8,
+        thread_id="Monthly revenue & order dynamics",
+    )
+
+    updated = update_thread_cards(store, NemoConfig())
+    assert "Monthly revenue & order dynamics" in updated
+    row = store.execute(
+        "SELECT title, summary_text FROM thread_cards WHERE thread_id = ?",
+        ["Monthly revenue & order dynamics"],
+    ).fetchone()
+    assert row is not None
+    assert str(row[0]).startswith("Theme:")

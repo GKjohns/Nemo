@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.prompt import Confirm, Prompt
+from rich.rule import Rule
 from rich.table import Table
-from rich.text import Text
-
 from nemo.config import NemoConfig
 from nemo.engine import NemoEngine
 from nemo.events import EventBus, EventType, NemoEvent
@@ -84,20 +85,23 @@ def _welcome_flow(project_dir: Path) -> bool:
     choice = Prompt.ask("Choose", choices=["q", "i", "o"], default="q")
 
     if choice == "q":
-        console.print("[cyan]Initializing project...[/cyan]")
-        data.initialize_project(project_dir)
-        console.print("[cyan]Loading TPC-H demo data...[/cyan]")
-        store = data.open_store(project_dir)
-        try:
-            add_tpch(store, scale=0.01)
-        finally:
-            store.close()
-        console.print("[cyan]Running 15-step exploration...[/cyan]")
+        with console.status("[cyan]Initializing project...[/cyan]", spinner="dots"):
+            data.initialize_project(project_dir)
+        console.print("  [green]✓[/green] Project initialized")
+        with console.status("[cyan]Loading TPC-H demo tables (scale 0.01)...[/cyan]", spinner="dots"):
+            store = data.open_store(project_dir)
+            try:
+                add_tpch(store, scale=0.01)
+            finally:
+                store.close()
+        console.print("  [green]✓[/green] 8 TPC-H tables loaded")
+        console.print()
         _run_engine(project_dir, steps=15, minutes=None, resume_run_id=None)
         return True
     elif choice == "i":
-        data.initialize_project(project_dir)
-        console.print("[green]Project initialized.[/green]")
+        with console.status("[cyan]Initializing project...[/cyan]", spinner="dots"):
+            data.initialize_project(project_dir)
+        console.print("[green]✓ Project initialized.[/green]")
         return True
     elif choice == "o":
         raw = Prompt.ask("Project directory path")
@@ -325,33 +329,245 @@ def _show_runs(store) -> None:
 # ── Engine runner ───────────────────────────────────────────────────────────
 
 
-class _LiveEventSubscriber:
-    """Prints engine events inline as they happen."""
+_ACTION_LABELS: dict[str, str] = {
+    "METRIC_TREND_SCAN": "Scanning for trends",
+    "CHANGEPOINT_DETECT": "Detecting change-points",
+    "TOP_GROUPS": "Ranking top groups",
+    "OUTLIER_GROUPS": "Looking for outlier groups",
+    "DATA_QUALITY_CHECK": "Checking data quality",
+    "SEGMENT_COMPARE": "Comparing segments",
+    "CORRELATION_SCAN": "Scanning for correlations",
+    "COVERAGE_EXPLORER": "Mapping coverage",
+    "ROBUSTNESS_CHECK": "Testing robustness",
+    "DRILL_DOWN": "Drilling deeper",
+    "JOIN_EXPLORE": "Exploring across tables",
+}
 
-    def __init__(self) -> None:
+
+def _describe_step(action_type: str, payload: dict) -> str:
+    """Human-readable one-liner: what is this step investigating?"""
+    label = _ACTION_LABELS.get(action_type, action_type.replace("_", " ").title())
+    table = payload.get("table", "")
+    metric = payload.get("metric_col", "")
+    dim = payload.get("dimension_col") or payload.get("group_col") or ""
+    if metric and dim:
+        return f"{label} in [bold]{metric}[/bold] by {dim} on [cyan]{table}[/cyan]"
+    if metric:
+        return f"{label} in [bold]{metric}[/bold] on [cyan]{table}[/cyan]"
+    if table:
+        return f"{label} on [cyan]{table}[/cyan]"
+    return label
+
+
+def _conf_badge(conf: float) -> str:
+    """Compact inline confidence: colored dot + value."""
+    if conf >= 0.7:
+        return f"[green]●[/green] {conf:.0%} confidence"
+    if conf >= 0.4:
+        return f"[yellow]●[/yellow] {conf:.0%} confidence"
+    return f"[red]●[/red] {conf:.0%} confidence"
+
+
+def _wrap_reasoning(text: str, indent: int = 4, width: int = 88) -> str:
+    """Wrap reasoning text to fit terminal width with consistent indentation."""
+    import textwrap
+
+    prefix = " " * indent
+    lines = textwrap.wrap(text.strip(), width=width - indent)
+    return ("\n" + prefix).join(lines)
+
+
+def _human_duration(ms: int) -> str:
+    """Friendly duration: '<1s', '2.3s', '1m 5s'."""
+    if ms < 1000:
+        return "<1s"
+    s = ms / 1000
+    if s < 60:
+        return f"{s:.1f}s"
+    m = int(s // 60)
+    remainder = s - m * 60
+    return f"{m}m {remainder:.0f}s"
+
+
+class _LiveEventSubscriber:
+    """Prints rich per-step output with hypothesis reasoning and findings."""
+
+    def __init__(self, budget: int) -> None:
+        self.budget = budget
         self.steps_done = 0
+        self.insights_created = 0
+        self.errors = 0
+        self._current_action: dict[str, Any] = {}
+        self._current_hypothesis: dict[str, Any] = {}
+        self._current_phase = ""
+        self._current_sql = ""
+        self._step_start: float = 0.0
+        self._status: Any | None = None
+
+    def set_status(self, status: Any) -> None:
+        self._status = status
+
+    def _update_spinner(self, text: str) -> None:
+        if self._status is not None:
+            self._status.update(text)
 
     async def on_event(self, event: NemoEvent) -> None:
-        if event.type == EventType.STEP_COMPLETED:
-            self.steps_done += 1
-            payload = event.payload
-            claim = str(payload.get("claim", ""))[:60]
-            conf = float(payload.get("confidence") or 0)
-            console.print(f"  [green]✓[/green] step {self.steps_done}: {claim} (confidence {conf:.2f})")
-        elif event.type == EventType.STEP_ERROR:
-            err = str(event.payload.get("error", ""))[:80]
-            console.print(f"  [red]✗[/red] step {event.step_num}: {err}")
+        if event.type == EventType.RUN_STARTED:
+            ds_count = len(event.payload.get("datasets", []))
+            frontier = event.payload.get("frontier_size", 0)
+            console.print(
+                f"  [dim]datasets: {ds_count}, frontier queued: {frontier}[/dim]"
+            )
+
+        elif event.type == EventType.MEMORY_LOADED:
+            tables = event.payload.get("tables", [])
+            learnings = event.payload.get("learnings_count", 0)
+            errs = len(event.payload.get("error_patterns", []))
+            self._update_spinner(
+                f"[cyan]Loading working memory... "
+                f"{len(tables)} tables, {learnings} learnings, {errs} error patterns[/cyan]"
+            )
+
         elif event.type == EventType.FRONTIER_REFRESHED:
-            gen = event.payload.get("after_score", 0)
-            console.print(f"  [dim]frontier: {gen} actions scored[/dim]")
+            generated = event.payload.get("generated", 0)
+            scored = event.payload.get("after_score", 0)
+            top = float(event.payload.get("top_score", 0))
+            console.print(
+                f"  [dim]frontier refreshed: {generated} generated → "
+                f"{scored} scored (top score {top:.2f})[/dim]"
+            )
+
+        elif event.type == EventType.HYPOTHESIS_FORMED:
+            self._step_start = time.perf_counter()
+            self._current_hypothesis = event.payload
+            question = event.payload.get("question", "")
+            reasoning = event.payload.get("reasoning", "")
+            table = event.payload.get("table", "")
+            step_label = f"Step {event.step_num}/{self.budget}"
+            console.print()
+            table_tag = f" [dim]({table})[/dim]" if table else ""
+            console.print(
+                f"  [cyan]→[/cyan] [bold]{step_label}[/bold]  {question}{table_tag}"
+            )
+            if reasoning:
+                wrapped = _wrap_reasoning(reasoning, indent=4, width=88)
+                console.print(f"    [dim]{wrapped}[/dim]")
+            self._update_spinner(
+                f"[cyan]{step_label} — Investigating...[/cyan]"
+            )
+
+        elif event.type == EventType.STEP_STARTED:
+            self._step_start = time.perf_counter()
+            action = event.payload.get("action", {})
+            self._current_action = action
+            hypothesis = event.payload.get("hypothesis")
+            if hypothesis:
+                self._current_hypothesis = hypothesis
+            elif not self._current_hypothesis:
+                action_payload = action.get("payload", {})
+                description = _describe_step(action.get("action_type", "?"), action_payload)
+                step_label = f"Step {event.step_num}/{self.budget}"
+                self._update_spinner(
+                    f"[cyan]{step_label} — {description}[/cyan]"
+                )
+
+        elif event.type == EventType.STEP_PHASE:
+            phase = event.payload.get("phase", "")
+            self._current_phase = phase
+            sql = event.payload.get("sql", "")
+            if sql:
+                self._current_sql = sql
+            step_label = f"Step {event.step_num}/{self.budget}"
+            phase_label = {
+                "compiling": "Writing query",
+                "executing": "Running query",
+                "summarizing": "Interpreting results",
+                "interpreting": "Interpreting results",
+                "linking": "Connecting to evidence graph",
+                "agent-exploring": "Agent exploring",
+            }.get(phase, phase)
+            self._update_spinner(
+                f"[cyan]{step_label} — {phase_label}...[/cyan]"
+            )
+
+        elif event.type == EventType.STEP_COMPLETED:
+            self.steps_done += 1
+            self.insights_created += 1
+            payload = event.payload
+            title = str(payload.get("title", ""))
+            claim = str(payload.get("claim", ""))
+            reasoning = str(payload.get("reasoning", ""))
+            conf = float(payload.get("confidence") or 0)
+            duration = int(payload.get("duration_ms") or 0)
+            edges = int(payload.get("edges_created") or 0)
+            row_count = int(payload.get("row_count") or 0)
+
+            console.print(
+                f"  [green]✓[/green] [bold]{title}[/bold]"
+            )
+            console.print(f"    {claim}")
+            if reasoning:
+                wrapped = _wrap_reasoning(reasoning, indent=4, width=88)
+                console.print(f"    [dim italic]{wrapped}[/dim italic]")
+            stats_parts = [
+                _conf_badge(conf),
+                f"{row_count} row{'s' if row_count != 1 else ''}",
+                f"{edges} edge{'s' if edges != 1 else ''}",
+                _human_duration(duration),
+            ]
+            console.print(f"    [dim]{' · '.join(stats_parts)}[/dim]")
+
+        elif event.type == EventType.STEP_ERROR:
+            self.errors += 1
+            err = str(event.payload.get("error", ""))
+            phase = str(event.payload.get("phase", ""))
+            console.print()
+            console.print(
+                f"  [red]✗[/red] [bold]Step {event.step_num}/{self.budget}[/bold]  "
+                f"Error during {phase}"
+            )
+            console.print(f"    [red]{err[:120]}[/red]")
+
+        elif event.type == EventType.NOTEBOOK_UPDATED:
+            themes = event.payload.get("themes", [])
+            total = event.payload.get("total_steps", 0)
+            if themes:
+                theme_str = ", ".join(themes)
+                console.print(f"    [dim]notebook: {theme_str} ({total} steps)[/dim]")
+
+        elif event.type == EventType.CONTRADICTION_DETECTED:
+            cluster = event.payload.get("cluster", {})
+            claims = cluster.get("claims", [])
+            if claims:
+                console.print(f"    [yellow]⚡ contradiction:[/yellow] {claims[0][:80]}")
+
         elif event.type == EventType.RUN_COMPLETED:
             stats = event.payload.get("stats", {})
+            learnings = event.payload.get("learnings_recorded", 0)
+            threads = event.payload.get("thread_cards_updated", 0)
+            duration_ms = stats.get("duration_ms", 0)
+            duration_s = duration_ms / 1000.0
+            console.print()
+            console.print(Rule("[bold green]Run complete[/bold green]", style="green"))
+            summary = Table(show_header=False, show_edge=False, box=None, padding=(0, 2))
+            summary.add_column(style="bold")
+            summary.add_column()
+            summary.add_row("Steps", str(stats.get("steps", 0)))
+            summary.add_row("Insights created", str(stats.get("insights_created", 0)))
+            summary.add_row("Errors", str(stats.get("errors", 0)))
+            summary.add_row("Duration", f"{duration_s:.1f}s")
+            summary.add_row("Frontier remaining", str(stats.get("frontier_remaining", 0)))
+            summary.add_row("Learnings recorded", str(learnings))
+            summary.add_row("Thread cards updated", str(threads))
+            console.print(summary)
+
+        elif event.type == EventType.RUN_INTERRUPTED:
+            stats = event.payload.get("stats", {})
+            console.print()
+            console.print(Rule("[bold yellow]Run interrupted[/bold yellow]", style="yellow"))
             console.print(
-                f"  [bold green]done[/bold green] — "
-                f"{stats.get('steps', 0)} steps, "
-                f"{stats.get('insights_created', 0)} insights, "
-                f"{stats.get('errors', 0)} errors, "
-                f"{stats.get('duration_ms', 0)}ms"
+                f"  {stats.get('steps', 0)} steps, "
+                f"{stats.get('insights_created', 0)} insights saved"
             )
 
 
@@ -361,20 +577,25 @@ def _run_engine(
     minutes: float | None,
     resume_run_id: str | None,
 ) -> None:
+    budget = steps or 15
     store = data.open_store(project_dir)
     try:
         config = NemoConfig.load(project_dir / "nemo.toml")
         bus = EventBus()
-        bus.subscribe(_LiveEventSubscriber())
+        subscriber = _LiveEventSubscriber(budget)
+        bus.subscribe(subscriber)
         engine = NemoEngine(store, config, bus)
-        run_id = asyncio.run(
-            engine.run(max_steps=steps, max_minutes=minutes, resume_run_id=resume_run_id)
-        )
-        console.print(f"[green]Run complete:[/green] {run_id}")
+        console.print()
+        console.print(Rule(f"[bold cyan]Exploration run ({budget} steps)[/bold cyan]", style="cyan"))
+        with console.status("[cyan]Starting run...[/cyan]", spinner="dots") as status:
+            subscriber.set_status(status)
+            run_id = asyncio.run(
+                engine.run(max_steps=steps, max_minutes=minutes, resume_run_id=resume_run_id)
+            )
     except KeyboardInterrupt:
-        console.print("[yellow]Run interrupted.[/yellow]")
+        console.print("\n[yellow]Run interrupted — progress saved.[/yellow]")
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Run failed:[/red] {exc}")
+        console.print(f"\n[red]Run failed:[/red] {exc}")
     finally:
         store.close()
 
@@ -437,7 +658,6 @@ def _repl(project_dir: Path) -> None:
             _with_store(project_dir, lambda s: _show_runs(s))
         elif cmd == "run":
             steps = int(arg) if arg.isdigit() else 15
-            console.print(f"[cyan]Starting run ({steps} steps)...[/cyan]")
             _run_engine(project_dir, steps=steps, minutes=None, resume_run_id=None)
         else:
             console.print(f"[red]Unknown command:[/red] {raw}  (type [bold]help[/bold] for commands)")
@@ -504,24 +724,26 @@ def _do_add(project_dir: Path, raw_path: str) -> None:
         return
     table_name = source.stem or "dataset"
     try:
-        store = data.open_store(project_dir)
-        try:
-            add_file(store, path=source, name=table_name, format="auto")
-        finally:
-            store.close()
-        console.print(f"[green]Added:[/green] {table_name}")
+        with console.status(f"[cyan]Adding {table_name}...[/cyan]", spinner="dots"):
+            store = data.open_store(project_dir)
+            try:
+                add_file(store, path=source, name=table_name, format="auto")
+            finally:
+                store.close()
+        console.print(f"[green]✓ Added:[/green] {table_name}")
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Add failed:[/red] {exc}")
 
 
 def _do_tpch(project_dir: Path) -> None:
     try:
-        store = data.open_store(project_dir)
-        try:
-            ids = add_tpch(store, scale=0.01)
-        finally:
-            store.close()
-        console.print(f"[green]TPC-H loaded:[/green] {len(ids)} tables")
+        with console.status("[cyan]Loading TPC-H demo tables (scale 0.01)...[/cyan]", spinner="dots"):
+            store = data.open_store(project_dir)
+            try:
+                ids = add_tpch(store, scale=0.01)
+            finally:
+                store.close()
+        console.print(f"[green]✓ TPC-H loaded:[/green] {len(ids)} tables")
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]TPC-H load failed:[/red] {exc}")
 
@@ -530,12 +752,13 @@ def _do_save_brief(project_dir: Path, raw_path: str) -> None:
     rel = raw_path or "reports/brief_latest.md"
     output = (project_dir / rel).resolve()
     try:
-        store = data.open_store(project_dir)
-        try:
-            written = data.save_brief_markdown(store, output, top_n=10)
-        finally:
-            store.close()
-        console.print(f"[green]Saved:[/green] {written}")
+        with console.status("[cyan]Generating brief...[/cyan]", spinner="dots"):
+            store = data.open_store(project_dir)
+            try:
+                written = data.save_brief_markdown(store, output, top_n=10)
+            finally:
+                store.close()
+        console.print(f"[green]✓ Saved:[/green] {written}")
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Save failed:[/red] {exc}")
 

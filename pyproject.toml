@@ -12,6 +12,7 @@ dependencies = [
     "duckdb",
     "openai",
     "pydantic",
+    "python-dotenv",
     "rich",
     "tomli-w",
     "typer[all]",

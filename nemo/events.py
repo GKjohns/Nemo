@@ -35,6 +35,10 @@ class EventType(str, Enum):
     CONTRADICTION_DETECTED = "contradiction:detected"
     THREAD_UPDATED = "thread:updated"
 
+    # Strategist events
+    HYPOTHESIS_FORMED = "hypothesis:formed"
+    NOTEBOOK_UPDATED = "notebook:updated"
+
     # Internal state
     MEMORY_LOADED = "memory:loaded"
     LEARNING_RECORDED = "learning:recorded"

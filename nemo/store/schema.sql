@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS insights (
     source_tables_json     VARCHAR,
     tags_json              VARCHAR,
     status                 VARCHAR NOT NULL DEFAULT 'ok',
-    error_text             VARCHAR
+    error_text             VARCHAR,
+    reasoning              VARCHAR
 );
 
 -- 3) edges
@@ -84,7 +85,14 @@ CREATE TABLE IF NOT EXISTS thread_cards (
     contradictions_json    VARCHAR
 );
 
--- 7) learnings
+-- 7) notebooks (per-run analyst notebook for strategist loop)
+CREATE TABLE IF NOT EXISTS notebooks (
+    run_id         VARCHAR PRIMARY KEY,
+    notebook_json  VARCHAR NOT NULL,
+    updated_at     TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- 8) learnings
 CREATE TABLE IF NOT EXISTS learnings (
     learning_id      VARCHAR PRIMARY KEY,
     created_at       TIMESTAMP NOT NULL DEFAULT now(),

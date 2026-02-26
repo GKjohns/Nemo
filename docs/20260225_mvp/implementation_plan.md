@@ -2369,6 +2369,174 @@ NEMO_MAX_QUERY_RUNTIME_MS=15000
 
 ---
 
+## Sprint 8 — Agent-Driven Exploration Loop
+
+Replace the cartesian-product generators and formula-based scoring with an LLM reasoning loop. The current system enumerates every `(table, metric, dimension)` × `action_type` combo, scores them with weights, and picks the top one. This produces a flat list of disconnected findings that all look alike. The new system works like a real analyst: form a hypothesis, test it, interpret the result, write it down, and decide what to investigate next based on what you've learned.
+
+### 8.1 Design: The Analyst Loop
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                                                         │
+│  ┌──────────┐    ┌─────────┐    ┌──────────────────┐   │
+│  │ PLAN     │ →  │ EXECUTE │ →  │ INTERPRET +       │   │
+│  │ (LLM     │    │ (run    │    │ UPDATE NOTEBOOK   │   │
+│  │  decides  │    │  SQL)   │    │ (LLM interprets   │   │
+│  │  what &   │    │         │    │  result, updates   │   │
+│  │  why)     │    │         │    │  running notes)    │   │
+│  └──────────┘    └─────────┘    └──────────────────┘   │
+│       ↑                                │                │
+│       │    ┌──────────────────┐        │                │
+│       └────│ NOTEBOOK         │ ←──────┘                │
+│            │ (compressed      │                         │
+│            │  investigation   │                         │
+│            │  state)          │                         │
+│            └──────────────────┘                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+Each step:
+1. **PLAN** — LLM sees the notebook (compressed findings) + schema and proposes the next question, with reasoning that connects to prior findings, plus SQL to answer it.
+2. **EXECUTE** — Run the SQL. If it errors, send the error back to the LLM for a retry (up to 2 retries).
+3. **INTERPRET + UPDATE** — LLM interprets the query result in context of the notebook, produces a structured insight (title, claim, confidence, reasoning), and updates the notebook (extend a theme, add findings, open/close questions).
+
+### 8.2 The Notebook (Context Management)
+
+The hardest problem: don't flood the "what next?" prompt with 100 raw insights.
+
+**Solution: a structured notebook that the LLM maintains.**
+
+```python
+class NotebookEntry(BaseModel):
+    theme: str              # "Retail pricing drivers"
+    summary: str            # 2-3 sentences consolidating findings
+    key_findings: list[str] # Bullet points
+    open_questions: list[str]
+    tables_touched: list[str]
+    step_count: int
+
+class Notebook(BaseModel):
+    entries: list[NotebookEntry]
+    total_steps: int
+```
+
+Properties:
+- **Compact**: Each theme is ~100-150 tokens. 5-8 themes = 500-1200 tokens total.
+- **Self-consolidating**: The LLM merges related findings into existing themes rather than appending endlessly.
+- **Naturally bounded**: Themes represent high-level investigation directions. Even after 100 steps, there are typically 5-10 themes, not 100.
+- **Directs exploration**: Open questions in each theme serve as natural prompts for what to investigate next.
+- **Resume-friendly**: Persisted per-run in a `notebooks` table.
+
+### 8.3 Cold Start
+
+When starting from zero insights, the strategist gets only the schema and a prompt to begin exploring. No deterministic generators needed — the LLM picks the most interesting starting point from the schema itself.
+
+When no LLM is available (no API key), the engine falls back to the existing generator→score→select pipeline.
+
+### 8.4 File Changes
+
+**New file: `nemo/planner/strategist.py`**
+
+Core module with:
+- `Hypothesis`, `NotebookEntry`, `Notebook`, `InterpretationResult` — Pydantic models
+- `plan_next_step(notebook, schema_context, config, client)` → `Hypothesis`
+- `interpret_and_update(hypothesis, result, notebook, schema_context, config, client)` → `InterpretationResult`
+- `build_schema_context(profiles)` → compact schema string
+- `apply_notebook_update(notebook, interpretation)` → updated `Notebook`
+
+**Modified: `nemo/engine.py`**
+
+New `_run_strategist_loop()` method that replaces the generator pipeline when an LLM client is available:
+```python
+while steps_done < budget:
+    hypothesis = await plan_next_step(notebook, schema_ctx, ...)
+    result = execute_query(store, hypothesis.sql, config)
+    if result.error:
+        hypothesis = await plan_next_step(notebook, schema_ctx, ..., error_context=...)
+        result = execute_query(store, hypothesis.sql, config)
+    interpretation = await interpret_and_update(hypothesis, result, notebook, ...)
+    store.insert_insight(reasoning=interpretation.reasoning, ...)
+    notebook = apply_notebook_update(notebook, interpretation)
+    save_notebook(store, run_id, notebook)
+    link_insight(...)
+```
+
+**Modified: `nemo/store/schema.sql`**
+- Add `reasoning` column to `insights`
+- Add `notebooks` table (run_id → notebook_json)
+
+**Modified: `nemo/store/db.py`**
+- `insert_insight()`: accept `reasoning` parameter
+- `save_notebook()` / `load_notebook()`: notebook persistence
+
+**Modified: `nemo/summarize/summarize.py`**
+- Add `reasoning` field to `InsightDraft`
+
+**Modified: `nemo/tui/app.py`**
+- Show hypothesis reasoning before each step
+- Show interpretation reasoning after each step
+- Format: question → reasoning → finding → confidence
+
+**Modified: `nemo/events.py`**
+- Add `HYPOTHESIS_FORMED` event type
+
+### 8.5 What Stays, What Goes
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Deterministic generators | **Fallback only** | Used when no LLM client available |
+| Formula scoring | **Fallback only** | Not used in strategist loop |
+| Frontier table | **Audit log** | Still records what was explored |
+| Compile step | **Removed from main path** | LLM writes SQL directly |
+| Agent executor | **Absorbed** | Strategist subsumes the ReAct agent |
+| Summarize | **Replaced by interpret** | Interpretation is part of the loop |
+| Graph linking | **Kept** | Still links insights via heuristics |
+| Thread cards | **Enhanced** | Notebook entries become thread cards |
+| Learnings | **Kept** | Still records cross-run patterns |
+| Event bus | **Kept** | New event types for hypothesis/reasoning |
+
+### 8.6 Display Format
+
+Before (flat list):
+```
+[1] OUTLIER_GROUPS score=0.925
+  insight Certain p_type groups deviate strongly...
+[2] OUTLIER_GROUPS score=0.925
+  insight Brand#51 has a notably high average retail price...
+```
+
+After (reasoning chain):
+```
+  → Step 1/15  What are the key pricing patterns across product types?
+    Reasoning: Starting with the broadest pricing dimension — product type
+    determines packaging, material, and positioning.
+
+  ✓ LARGE PLATED TIN commands highest avg retail price
+    Avg retail $1,622 vs category mean $1,410 (z=+2.64). Lowest is LARGE
+    POLISHED COPPER at $1,153 (z=-2.87). Material and finish drive a 41%
+    spread in avg pricing.
+    ● 80% confidence · 150 rows · 1.2s
+
+  → Step 2/15  Does this pricing gap persist at the brand level, or is it
+    driven by product type mix?
+    Reasoning: Step 1 showed large type-level pricing variance. If brands
+    differ mainly because they sell different product types, the "brand
+    premium" is really a mix effect.
+    ...
+```
+
+### Sprint 8 Deliverables
+
+- [ ] `nemo/planner/strategist.py` with LLM strategist loop
+- [ ] Notebook model with per-run persistence
+- [ ] Engine uses strategist when LLM available, falls back to generators
+- [ ] `reasoning` field stored on every insight
+- [ ] TUI displays hypothesis + reasoning for each step
+- [ ] Existing tests pass (golden test updated for new flow)
+- [ ] Agent-driven loop produces coherent, connected findings on TPC-H demo
+
+---
+
 ## Definition of Done
 
 The MVP is complete when:

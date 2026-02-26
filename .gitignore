@@ -89,3 +89,7 @@ Thumbs.db
 
 # Supabase local
 supabase/.temp/
+
+# Nemo local state (DuckDB)
+nemo.duckdb
+nemo.duckdb*

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ SYSTEM_TABLES = (
     "frontier",
     "runs",
     "thread_cards",
+    "notebooks",
     "learnings",
 )
 
@@ -29,10 +32,11 @@ class NemoStore:
         self.conn = duckdb.connect(str(self.db_path))
 
     def initialize(self) -> None:
-        """Apply the bundled schema.sql file."""
+        """Apply the bundled schema.sql file and run any needed migrations."""
         schema_path = Path(__file__).with_name("schema.sql")
         schema_sql = schema_path.read_text(encoding="utf-8")
         self.conn.execute(schema_sql)
+        self._migrate()
 
     def execute(self, sql: str, params: list[Any] | tuple[Any, ...] | None = None) -> duckdb.DuckDBPyConnection:
         """Execute SQL directly against the DuckDB connection."""
@@ -79,6 +83,7 @@ class NemoStore:
         source_tables_json: str | list[str] | None = None,
         tags_json: str | list[str] | None = None,
         error_text: str | None = None,
+        reasoning: str | None = None,
     ) -> str:
         insight_id = _new_id("insight")
         self.execute(
@@ -87,9 +92,9 @@ class NemoStore:
                 insight_id, run_id, thread_id, title, question, hypothesis_struct_json,
                 sql, result_summary_json, result_sample_json, claim, claim_struct_json,
                 confidence, effect_size, coverage, cost_ms, source_tables_json, tags_json,
-                status, error_text
+                status, error_text, reasoning
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 insight_id,
@@ -111,6 +116,7 @@ class NemoStore:
                 _json_or_none(tags_json),
                 status,
                 error_text,
+                reasoning,
             ],
         )
         return insight_id
@@ -203,6 +209,36 @@ class NemoStore:
             ],
         )
         return thread_id
+
+    def save_notebook(self, run_id: str, notebook_json: str | dict) -> None:
+        payload = _json_or_none(notebook_json) or "{}"
+        existing = self.execute(
+            "SELECT run_id FROM notebooks WHERE run_id = ?", [run_id]
+        ).fetchone()
+        if existing:
+            self.execute(
+                "UPDATE notebooks SET notebook_json = ?, updated_at = now() WHERE run_id = ?",
+                [payload, run_id],
+            )
+        else:
+            self.execute(
+                "INSERT INTO notebooks (run_id, notebook_json) VALUES (?, ?)",
+                [run_id, payload],
+            )
+
+    def load_notebook(self, run_id: str) -> dict | None:
+        rows = self._query_dicts(
+            "SELECT notebook_json FROM notebooks WHERE run_id = ? LIMIT 1", [run_id]
+        )
+        if not rows:
+            return None
+        raw = rows[0].get("notebook_json", "{}")
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        return raw if isinstance(raw, dict) else None
 
     def insert_learning(
         self,
@@ -352,6 +388,17 @@ class NemoStore:
         ).fetchone()
         return bool(row and row[0] > 0)
 
+    def _migrate(self) -> None:
+        """Additive migrations for existing databases."""
+        migrations = [
+            "ALTER TABLE insights ADD COLUMN reasoning VARCHAR",
+        ]
+        for sql in migrations:
+            try:
+                self.execute(sql)
+            except Exception:  # noqa: BLE001
+                pass
+
     def close(self) -> None:
         self.conn.close()
 
@@ -377,4 +424,13 @@ def _json_or_none(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         return value
-    return json.dumps(value)
+    return json.dumps(value, default=_json_default)
+
+
+def _json_default(value: Any) -> Any:
+    """Serialize DuckDB/Python scalar types that json can't handle by default."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")

@@ -27,6 +27,7 @@ class InsightDraft:
     claim_struct: dict
     result_summary: dict
     result_sample: list[dict]
+    reasoning: str | None = None
 
 
 class SummaryExtraction(BaseModel):
@@ -187,9 +188,21 @@ async def _summarize_with_llm(
         "recent_insights": insights_preview,
     }
     instructions = (
-        "You are a data analyst. Summarize query results into a concise insight. "
-        "Confidence must be between 0 and 1. Keep title short and concrete. "
-        "If evidence is weak, lower confidence and reflect uncertainty."
+        "You are an expert data analyst examining query results from an automated data exploration system. "
+        "Your job is to extract meaningful, actionable insights — the kind a business analyst would care about.\n\n"
+        "RULES:\n"
+        "- Confidence must be between 0 and 1.\n"
+        "- Keep the title short (≤10 words) and describe the FINDING, not the query.\n"
+        "- Focus on business-relevant patterns: revenue drivers, cost anomalies, segment differences, "
+        "supply-chain outliers, customer behavior, quality issues, etc.\n"
+        "- If the result is trivial or tautological (e.g. averaging a primary/surrogate key, "
+        "computing stats on sequential IDs, correlating key columns), set confidence ≤ 0.2 "
+        "and prefix the title with '[trivial]'.\n"
+        "- If a finding merely restates the table schema or row count with no deeper pattern, "
+        "set confidence ≤ 0.3.\n"
+        "- Higher confidence (0.7+) requires a non-obvious pattern with clear business meaning.\n"
+        "- effect_size should quantify the magnitude of the finding (e.g. percentage difference, "
+        "z-score, correlation coefficient) — set null if not applicable.\n"
     )
 
     for attempt in range(3):

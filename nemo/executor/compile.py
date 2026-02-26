@@ -141,41 +141,74 @@ def compile_outlier_groups(payload: dict) -> str:
 
 def compile_correlation_scan(payload: dict) -> str:
     table = _ident(payload.get("table", ""))
-    columns = payload.get("columns") or []
+    columns = [c for c in (payload.get("columns") or []) if not _is_likely_key(c)]
     if len(columns) < 2:
         return f"SELECT COUNT(*) AS row_count FROM {table}"
-    col_a = _ident(columns[0])
-    col_b = _ident(columns[1])
+    pairs: list[str] = []
+    for i in range(len(columns)):
+        for j in range(i + 1, len(columns)):
+            a, b = _ident(columns[i]), _ident(columns[j])
+            label = f"corr_{columns[i]}__{columns[j]}"
+            pairs.append(f"ROUND(corr({a}, {b}), 4) AS \"{label}\"")
+    if len(pairs) > 10:
+        pairs = pairs[:10]
+    not_null = " AND ".join(f"{_ident(c)} IS NOT NULL" for c in columns)
+    select = ",\n       ".join(pairs)
     return (
-        f"SELECT corr({col_a}, {col_b}) AS correlation,\n"
-        "       COUNT(*) AS row_count\n"
+        f"SELECT {select},\n"
+        f"       COUNT(*) AS row_count\n"
         f"FROM {table}\n"
-        f"WHERE {col_a} IS NOT NULL AND {col_b} IS NOT NULL"
+        f"WHERE {not_null}"
     )
 
 
 def compile_data_quality(payload: dict) -> str:
     table = _ident(payload.get("table", ""))
-    return (
-        f"SELECT COUNT(*) AS row_count,\n"
-        "       COUNT(*) - COUNT(*) FILTER (WHERE TRUE) AS impossible_check,\n"
-        "       SUM(CASE WHEN TRUE THEN 1 ELSE 0 END) AS non_null_rows\n"
-        f"FROM {table}"
-    )
+    key_columns: list[str] = payload.get("key_columns") or []
+
+    parts = ["COUNT(*) AS total_rows"]
+    for col_name in key_columns[:5]:
+        c = _ident(col_name)
+        safe = col_name.replace('"', "")
+        parts.append(f"SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) AS {safe}_null_count")
+        parts.append(f"COUNT(DISTINCT {c}) AS {safe}_distinct_count")
+
+    if key_columns:
+        pk = _ident(key_columns[0])
+        safe_pk = key_columns[0].replace('"', "")
+        parts.append(f"COUNT(*) - COUNT(DISTINCT {pk}) AS {safe_pk}_duplicate_count")
+
+    select = ",\n       ".join(parts)
+    return f"SELECT {select}\nFROM {table}"
 
 
 def compile_coverage_explorer(payload: dict, profiles: list[TableProfile]) -> str:
     table_name = str(payload.get("table", ""))
     table = _ident(table_name)
-    numeric_cols = []
+    metric_cols: list[str] = []
+    categorical_cols: list[str] = []
     for profile in profiles:
         if profile.name == table_name:
-            numeric_cols = [col.name for col in profile.columns if _is_numeric(col.dtype)]
+            for col in profile.columns:
+                if _is_numeric(col.dtype) and not _is_likely_key(col.name):
+                    metric_cols.append(col.name)
+                elif not _is_numeric(col.dtype) and col.distinct_count <= 50:
+                    categorical_cols.append(col.name)
             break
-    if numeric_cols:
-        metric = _ident(numeric_cols[0])
-        return f"SELECT AVG({metric}) AS sample_metric, COUNT(*) AS row_count FROM {table}"
-    return f"SELECT COUNT(*) AS row_count FROM {table}"
+
+    parts = ["COUNT(*) AS row_count"]
+    for col_name in metric_cols[:3]:
+        c = _ident(col_name)
+        parts.append(f"AVG({c}) AS avg_{col_name}")
+        parts.append(f"STDDEV_SAMP({c}) AS stddev_{col_name}")
+        parts.append(f"MIN({c}) AS min_{col_name}")
+        parts.append(f"MAX({c}) AS max_{col_name}")
+    for col_name in categorical_cols[:2]:
+        c = _ident(col_name)
+        parts.append(f"COUNT(DISTINCT {c}) AS distinct_{col_name}")
+
+    select = ",\n       ".join(parts)
+    return f"SELECT {select}\nFROM {table}"
 
 
 def compile_robustness_check(payload: dict, prior_sql: str) -> str:
@@ -210,3 +243,15 @@ def _ident(value: str) -> str:
 def _is_numeric(dtype: str) -> bool:
     lowered = dtype.lower()
     return any(token in lowered for token in ("int", "decimal", "numeric", "double", "float", "real", "hugeint"))
+
+
+def _is_likely_key(col_name: str) -> bool:
+    """Name-based heuristic: columns that are likely surrogate/primary keys."""
+    name = col_name.lower()
+    return (
+        name.endswith("key")
+        or name.endswith("_id")
+        or name == "id"
+        or name.endswith("_sk")
+        or name.endswith("_pk")
+    )

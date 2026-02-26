@@ -1,3 +1,6 @@
+import json
+from decimal import Decimal
+
 from nemo.store.db import SYSTEM_TABLES
 
 
@@ -76,3 +79,27 @@ def test_store_insert_and_query_all_system_tables(store):
     thread_count = store.execute("SELECT COUNT(*) FROM thread_cards").fetchone()[0]
     assert learning_count == 1
     assert thread_count == 1
+
+
+def test_store_serializes_decimal_payloads(store):
+    run_id = store.insert_run({"mode": "decimal-test"})
+    insight_id = store.insert_insight(
+        title="Decimal serialization",
+        question="Can we store decimal values?",
+        sql="select 1",
+        result_summary_json={"value": Decimal("12.50")},
+        result_sample_json=[{"amount": Decimal("42.00")}],
+        claim="Decimal payload should be persisted as JSON.",
+        run_id=run_id,
+    )
+
+    row = store.execute(
+        "SELECT result_summary_json, result_sample_json FROM insights WHERE insight_id = ?",
+        [insight_id],
+    ).fetchone()
+    assert row is not None
+
+    summary = json.loads(row[0])
+    sample = json.loads(row[1])
+    assert summary["value"] == 12.5
+    assert sample[0]["amount"] == 42

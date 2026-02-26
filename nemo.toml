@@ -1,0 +1,35 @@
+[budget]
+max_steps = 100
+max_runtime_minutes = 30
+max_query_runtime_ms = 15000
+saturation_threshold = 0.15
+
+[scoring]
+weight_info_gain = 0.3
+weight_impact = 0.25
+weight_novelty = 0.2
+weight_feasibility = 0.15
+weight_diversity = 0.1
+
+[llm]
+model = "gpt-5-mini"
+
+[exploration]
+reflect_every = 10
+max_actions_per_thread = 5
+join_confidence_threshold = 0.7
+use_learnings = true
+
+[hints]
+time_columns = []
+important_dimensions = []
+
+[hints.join_overrides]
+
+[hints.metrics]
+
+[hooks]
+
+[output]
+verbose = false
+quiet = false

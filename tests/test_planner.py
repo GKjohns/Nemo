@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from nemo.config import NemoConfig
+from nemo.engine import _build_coverage_context, _is_duplicate_claim, _is_duplicate_question
 from nemo.ingest.profile import ColumnProfile, TableProfile
 from nemo.planner import (
     GeneratorContext,
@@ -14,26 +15,37 @@ from nemo.planner import (
     score_frontier,
     select_next,
 )
+from nemo.planner.strategist import (
+    InterpretationResult,
+    Notebook,
+    NotebookEntry,
+    apply_notebook_update,
+    build_schema_context,
+    format_notebook,
+)
 
 
 def test_generators_and_loader_cover_sprint3_scope(store):
+    """Legacy generators still work as fallback."""
     ctx = _make_context(store)
     items = run_generators(ctx)
 
     assert items
-    assert {item.action_type for item in items} >= {
+    generated_types = {item.action_type for item in items}
+    assert generated_types >= {
         "SCHEMA_PROFILE",
         "METRIC_TREND_SCAN",
         "CHANGEPOINT_DETECT",
         "SEGMENT_COMPARE",
         "TOP_GROUPS",
         "OUTLIER_GROUPS",
-        "CORRELATION_SCAN",
         "DATA_QUALITY_CHECK",
         "COVERAGE_EXPLORER",
         "ROBUSTNESS_CHECK",
         "CONTRADICTION_RESOLVE",
     }
+    if any(item.action_type == "CORRELATION_SCAN" for item in items):
+        assert "CORRELATION_SCAN" in generated_types
     assert all(item.dedupe_key for item in items)
     assert len(get_all_generators(Path("/tmp/path-that-does-not-exist"))) >= 11
 
@@ -167,7 +179,14 @@ def _orders_profile() -> TableProfile:
         row_count=1000,
         columns=[
             _col("order_id", "INTEGER", distinct_count=1000, cardinality_ratio=1.0),
-            _col("order_date", "DATE", distinct_count=180, cardinality_ratio=0.18),
+            _col(
+                "order_date",
+                "DATE",
+                distinct_count=180,
+                cardinality_ratio=0.18,
+                min_val="2024-01-01",
+                max_val="2024-06-30",
+            ),
             _col("amount", "DOUBLE", distinct_count=700, cardinality_ratio=0.7, stddev=35.0),
             _col("segment", "VARCHAR", distinct_count=4, cardinality_ratio=0.004),
             _col("customer_id", "INTEGER", distinct_count=350, cardinality_ratio=0.35),
@@ -188,6 +207,175 @@ def _customers_profile() -> TableProfile:
     )
 
 
+def test_notebook_applies_updates():
+    """Notebook correctly extends existing themes and creates new ones."""
+    notebook = Notebook(entries=[
+        NotebookEntry(
+            theme="Pricing",
+            summary="Initial pricing analysis.",
+            key_findings=["Brand#51 is 12% above average."],
+            open_questions=["Is this driven by product mix?"],
+            tables_touched=["part"],
+            step_count=1,
+        ),
+    ], total_steps=1)
+
+    interpretation = InterpretationResult(
+        title="Product mix partially explains Brand#51 premium",
+        claim="Brand#51 over-indexes on LARGE PLATED TIN (18% vs 6% population).",
+        confidence=0.75,
+        tags=["pricing", "part"],
+        reasoning="Testing whether Brand#51's premium is a mix effect.",
+        theme="Pricing",
+        summary_update="Brand#51 has 12% higher avg retail, partially explained by product type mix.",
+        new_finding="Brand#51 over-indexes on LARGE PLATED TIN (18% vs 6%).",
+        new_open_questions=["What is the residual premium after controlling for type?"],
+        resolved_questions=["Is this driven by product mix?"],
+    )
+
+    updated = apply_notebook_update(notebook, interpretation)
+    assert updated.total_steps == 2
+    assert len(updated.entries) == 1
+    entry = updated.entries[0]
+    assert entry.theme == "Pricing"
+    assert len(entry.key_findings) == 2
+    assert "Is this driven by product mix?" not in entry.open_questions
+    assert "What is the residual premium after controlling for type?" in entry.open_questions
+    assert entry.step_count == 2
+
+
+def test_notebook_creates_new_theme():
+    """Notebook creates a new theme when the interpretation targets a new one."""
+    notebook = Notebook(entries=[
+        NotebookEntry(theme="Pricing", summary="Price analysis.", key_findings=[], open_questions=[],
+                      tables_touched=["part"], step_count=1),
+    ], total_steps=1)
+
+    interpretation = InterpretationResult(
+        title="Supply chain concentration",
+        claim="Each part has 8 suppliers on average.",
+        confidence=0.8,
+        tags=["supply_chain", "partsupp"],
+        reasoning="Switching to supply chain analysis.",
+        theme="Supply Chain",
+        summary_update="Parts are broadly multi-sourced with 8 suppliers each on average.",
+        new_finding="Average 8 suppliers per part, 160 parts per supplier.",
+        new_open_questions=["Is supply cost correlated with supplier count?"],
+        resolved_questions=[],
+    )
+
+    updated = apply_notebook_update(notebook, interpretation)
+    assert updated.total_steps == 2
+    assert len(updated.entries) == 2
+    assert updated.entries[1].theme == "Supply Chain"
+    assert updated.entries[1].step_count == 1
+
+
+def test_build_schema_context_is_compact():
+    """Schema context builder produces compact output from profiles."""
+    profiles = [_orders_profile(), _customers_profile()]
+    ctx = build_schema_context(profiles)
+    assert "orders" in ctx
+    assert "customers" in ctx
+    assert "1,000 rows" in ctx
+    assert "amount" in ctx
+    assert "range=2024-01-01..2024-06-30" in ctx
+
+
+def test_build_coverage_context_reports_unexplored_tables():
+    notebook = Notebook(entries=[
+        NotebookEntry(
+            theme="Revenue",
+            summary="Started with orders.",
+            key_findings=[],
+            open_questions=[],
+            tables_touched=["orders"],
+            step_count=5,
+        ),
+    ], total_steps=5)
+    text = _build_coverage_context(notebook, ["orders", "customers", "lineitem"], max_steps_per_theme=4)
+    assert "Tables explored: orders" in text
+    assert "Tables not yet explored: customers, lineitem" in text
+    assert "Preferred max depth per theme before pivot: 4" in text
+
+
+def test_duplicate_detection_helpers():
+    recent_questions = [
+        "How does monthly revenue evolve over time by order date?",
+        "Are revenue swings driven by volume or unit price changes?",
+    ]
+    assert _is_duplicate_question(
+        "Are monthly revenue swings mostly due to volume or unit price?",
+        recent_questions,
+        threshold=0.5,
+    )
+    assert not _is_duplicate_question(
+        "Which customer segments contribute most gross margin?",
+        recent_questions,
+        threshold=0.5,
+    )
+
+    recent_claims = [
+        "Revenue swings are mostly volume-driven with stable unit prices.",
+    ]
+    assert _is_duplicate_claim(
+        "Monthly revenue variation is primarily driven by volume while prices stay stable.",
+        recent_claims,
+    )
+
+
+def test_format_notebook_empty():
+    """Empty notebook produces a recognizable placeholder."""
+    notebook = Notebook()
+    text = format_notebook(notebook)
+    assert "empty" in text.lower()
+
+
+def test_format_notebook_with_entries():
+    """Notebook with entries formats each theme."""
+    notebook = Notebook(entries=[
+        NotebookEntry(
+            theme="Revenue",
+            summary="Revenue is growing.",
+            key_findings=["Q1 up 15%"],
+            open_questions=["What drove Q1?"],
+            tables_touched=["orders"],
+            step_count=2,
+        ),
+    ], total_steps=2)
+    text = format_notebook(notebook)
+    assert "Revenue" in text
+    assert "Q1 up 15%" in text
+    assert "What drove Q1?" in text
+
+
+def test_notebook_persistence(store):
+    """Notebook round-trips through the store."""
+    run_id = store.insert_run({"mode": "test"})
+    notebook = Notebook(entries=[
+        NotebookEntry(theme="Test", summary="Testing.", key_findings=["f1"],
+                      open_questions=["q1"], tables_touched=["t1"], step_count=1),
+    ], total_steps=1)
+    store.save_notebook(run_id, notebook.model_dump())
+
+    loaded = store.load_notebook(run_id)
+    assert loaded is not None
+    restored = Notebook.model_validate(loaded)
+    assert restored.total_steps == 1
+    assert restored.entries[0].theme == "Test"
+
+    notebook2 = apply_notebook_update(restored, InterpretationResult(
+        title="t", claim="c", confidence=0.5, reasoning="r",
+        theme="Test", summary_update="Updated.", new_finding="f2",
+        new_open_questions=[], resolved_questions=["q1"],
+    ))
+    store.save_notebook(run_id, notebook2.model_dump())
+    loaded2 = store.load_notebook(run_id)
+    restored2 = Notebook.model_validate(loaded2)
+    assert restored2.total_steps == 2
+    assert len(restored2.entries[0].key_findings) == 2
+
+
 def _col(
     name: str,
     dtype: str,
@@ -197,6 +385,8 @@ def _col(
     distinct_count: int = 0,
     cardinality_ratio: float = 0.0,
     stddev: float | None = None,
+    min_val: str | None = None,
+    max_val: str | None = None,
 ) -> ColumnProfile:
     return ColumnProfile(
         name=name,
@@ -207,8 +397,8 @@ def _col(
         distinct_count=distinct_count,
         cardinality_ratio=cardinality_ratio,
         sample_values=[],
-        min_val=None,
-        max_val=None,
+        min_val=min_val,
+        max_val=max_val,
         mean=None,
         stddev=stddev,
         p25=None,

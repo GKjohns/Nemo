@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass
@@ -29,6 +32,7 @@ class NemoConfig:
 
     # LLM
     model: str = "gpt-5-mini"
+    plan_model: str | None = None
     openai_api_key: str | None = None
 
     # Exploration
@@ -36,6 +40,9 @@ class NemoConfig:
     max_actions_per_thread: int = 5
     join_confidence_threshold: float = 0.7
     use_learnings: bool = True
+    max_steps_per_theme: int = 4
+    question_similarity_threshold: float = 0.82
+    stagnation_step_limit: int = 3
 
     # User-defined hints
     time_columns: list[str] = field(default_factory=list)
@@ -77,6 +84,8 @@ class NemoConfig:
 
         llm = raw.get("llm", {})
         config.model = str(llm.get("model", config.model))
+        plan_model = llm.get("plan_model")
+        config.plan_model = str(plan_model) if plan_model is not None else None
         file_key = llm.get("openai_api_key")
         config.openai_api_key = str(file_key) if file_key else os.getenv("OPENAI_API_KEY")
 
@@ -87,6 +96,11 @@ class NemoConfig:
             exploration.get("join_confidence_threshold", config.join_confidence_threshold)
         )
         config.use_learnings = bool(exploration.get("use_learnings", config.use_learnings))
+        config.max_steps_per_theme = int(exploration.get("max_steps_per_theme", config.max_steps_per_theme))
+        config.question_similarity_threshold = float(
+            exploration.get("question_similarity_threshold", config.question_similarity_threshold)
+        )
+        config.stagnation_step_limit = int(exploration.get("stagnation_step_limit", config.stagnation_step_limit))
 
         hints = raw.get("hints", {})
         config.time_columns = list(hints.get("time_columns", config.time_columns))
@@ -122,6 +136,10 @@ def write_default_config(path: Path) -> None:
     if defaults.max_scan_rows is not None:
         budget_payload["max_scan_rows"] = int(defaults.max_scan_rows)
 
+    llm_payload: dict[str, Any] = {"model": defaults.model}
+    if defaults.plan_model:
+        llm_payload["plan_model"] = defaults.plan_model
+
     payload = {
         "budget": {
             **budget_payload,
@@ -133,14 +151,15 @@ def write_default_config(path: Path) -> None:
             "weight_feasibility": defaults.weight_feasibility,
             "weight_diversity": defaults.weight_diversity,
         },
-        "llm": {
-            "model": defaults.model,
-        },
+        "llm": llm_payload,
         "exploration": {
             "reflect_every": defaults.reflect_every,
             "max_actions_per_thread": defaults.max_actions_per_thread,
             "join_confidence_threshold": defaults.join_confidence_threshold,
             "use_learnings": defaults.use_learnings,
+            "max_steps_per_theme": defaults.max_steps_per_theme,
+            "question_similarity_threshold": defaults.question_similarity_threshold,
+            "stagnation_step_limit": defaults.stagnation_step_limit,
         },
         "hints": {
             "time_columns": [],

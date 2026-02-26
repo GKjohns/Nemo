@@ -35,6 +35,34 @@ def update_thread_cards(store: NemoStore, config: NemoConfig) -> list[str]:
         )
         thread_ids.append(thread_id)
 
+    rows = store.execute(
+        """
+        SELECT thread_id, insight_id, claim
+        FROM insights
+        WHERE thread_id IS NOT NULL
+          AND TRIM(thread_id) <> ''
+        ORDER BY created_at DESC
+        LIMIT 800
+        """
+    ).fetchall()
+    by_theme: dict[str, list[tuple[str, str]]] = {}
+    for thread_id, insight_id, claim in rows:
+        key = str(thread_id or "").strip()
+        if not key:
+            continue
+        by_theme.setdefault(key, []).append((str(insight_id), str(claim or "")))
+    for thread_id, members in by_theme.items():
+        _upsert_thread_card(
+            store=store,
+            thread_id=thread_id,
+            title=f"Theme: {thread_id}",
+            summary_text=f"{len(members)} insight(s) currently grouped under this theme.",
+            key_insight_ids_json=[member[0] for member in members[:12]],
+            open_questions_json=[],
+            contradictions_json=[member[1] for member in members[:6] if member[1]],
+        )
+        thread_ids.append(thread_id)
+
     configured_metrics = [str(metric) for metric in config.key_metrics.values()]
     if configured_metrics:
         rows = store.execute(
