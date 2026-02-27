@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -9,6 +10,8 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
 from nemo.config import NemoConfig
 from nemo.events import EventBus, EventType, NemoEvent
@@ -33,7 +36,13 @@ from nemo.planner import (
     should_render_verdict,
 )
 from nemo.planner.arbiter import decide_phase, should_consult_arbiter
-from nemo.planner.models import EvidenceLink, FrontierItem, HypothesisRecord, PhaseDecision
+from nemo.planner.models import (
+    DuplicateCheck,
+    EvidenceLink,
+    FrontierItem,
+    HypothesisRecord,
+    PhaseDecision,
+)
 from nemo.planner.strategist import (
     Hypothesis,
     InterpretationResult,
@@ -411,10 +420,12 @@ class NemoEngine:
                     )
                     continue
 
-                if _is_duplicate_question(
+                if await is_semantically_duplicate(
                     hypothesis.question,
-                    recent_questions,
-                    threshold=float(self.config.question_similarity_threshold),
+                    recent_questions[-8:],
+                    self.config,
+                    self._llm_client,
+                    mode="question",
                 ):
                     try:
                         hypothesis = await plan_next_step(
@@ -742,7 +753,13 @@ class NemoEngine:
             notebook = apply_notebook_update(notebook, interpretation)
             self.store.save_notebook(run_id, notebook.model_dump_json())
 
-            if _is_duplicate_claim(interpretation.claim, recent_claims):
+            if await is_semantically_duplicate(
+                interpretation.claim,
+                recent_claims[-8:],
+                self.config,
+                self._llm_client,
+                mode="claim",
+            ):
                 stagnation_count += 1
             else:
                 stagnation_count = 0
@@ -1205,3 +1222,61 @@ def _is_duplicate_claim(claim: str, recent_claims: list[str]) -> bool:
         max(_jaccard_similarity(claim, prior), _overlap_similarity(claim, prior)) >= 0.6
         for prior in recent_claims[-5:]
     )
+
+
+async def is_semantically_duplicate(
+    new_text: str,
+    candidates: list[str],
+    config: NemoConfig,
+    client: OpenAI | None,
+    *,
+    mode: str = "generic",
+) -> bool:
+    """Classify semantic duplication using an LLM, with lexical fallback."""
+    candidate_texts = [item.strip() for item in candidates if item and item.strip()]
+    text = new_text.strip()
+    if not text or not candidate_texts:
+        return False
+
+    if client is not None:
+        payload = {
+            "mode": mode,
+            "new_text": text,
+            "candidates": [
+                {"index": idx, "text": candidate}
+                for idx, candidate in enumerate(candidate_texts)
+            ],
+        }
+        instructions = (
+            "Determine whether NEW_TEXT is semantically equivalent to any candidate text. "
+            "Treat paraphrases and synonym substitutions as duplicates when analytical intent is the same. "
+            "Return is_duplicate=true if ANY candidate is effectively the same question/claim; otherwise false. "
+            "Keep reasoning concise."
+        )
+        for attempt in range(3):
+            try:
+                response = client.responses.parse(
+                    model="gpt-5-nano",
+                    instructions=instructions,
+                    input=json.dumps(payload),
+                    text_format=DuplicateCheck,
+                )
+                parsed = response.output_parsed
+                if parsed is not None:
+                    return bool(parsed.is_duplicate)
+                raise RuntimeError("duplicate check parse produced no output")
+            except (APIConnectionError, APITimeoutError):
+                if attempt == 2:
+                    break
+                await asyncio.sleep(2**attempt)
+            except RateLimitError:
+                if attempt == 2:
+                    break
+                await asyncio.sleep(5 * (attempt + 1))
+            except Exception:  # noqa: BLE001
+                break
+
+    if mode == "question":
+        threshold = float(config.question_similarity_threshold)
+        return _is_duplicate_question(text, candidate_texts, threshold=threshold)
+    return _is_duplicate_claim(text, candidate_texts)

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from nemo.config import NemoConfig
-from nemo.engine import _build_coverage_context, _is_duplicate_claim, _is_duplicate_question
+from nemo.engine import (
+    _build_coverage_context,
+    _is_duplicate_question,
+    is_semantically_duplicate,
+)
 from nemo.executor.run import ExecutionResult
 from nemo.ingest.profile import ColumnProfile, TableProfile
 from nemo.planner import (
@@ -19,7 +24,14 @@ from nemo.planner import (
     select_next,
 )
 from nemo.planner.arbiter import decide_phase, should_consult_arbiter
-from nemo.planner.models import EvidenceLink, HypothesisRecord, PhaseDecision, RankedCandidate, RerankedFrontier
+from nemo.planner.models import (
+    DuplicateCheck,
+    EvidenceLink,
+    HypothesisRecord,
+    PhaseDecision,
+    RankedCandidate,
+    RerankedFrontier,
+)
 from nemo.planner.strategist import (
     Hypothesis,
     InterpretationResult,
@@ -386,28 +398,64 @@ def test_build_coverage_context_reports_unexplored_tables():
     assert "Preferred max depth per theme before pivot: 4" in text
 
 
-def test_duplicate_detection_helpers():
-    recent_questions = [
-        "How does monthly revenue evolve over time by order date?",
-        "Are revenue swings driven by volume or unit price changes?",
-    ]
-    assert _is_duplicate_question(
-        "Are monthly revenue swings mostly due to volume or unit price?",
-        recent_questions,
-        threshold=0.5,
-    )
-    assert not _is_duplicate_question(
-        "Which customer segments contribute most gross margin?",
-        recent_questions,
-        threshold=0.5,
+def test_semantic_duplicate_llm_catches_paraphrase_jaccard_misses():
+    baseline = "How does revenue differ by geography?"
+    paraphrase = "What drives revenue variation across regions?"
+    assert not _is_duplicate_question(paraphrase, [baseline], threshold=0.82)
+
+    class _FakeResponses:
+        def parse(self, **kwargs):
+            payload = json.loads(str(kwargs.get("input", "{}")))
+            new_text = str(payload.get("new_text", "")).lower()
+            candidates = [str(row.get("text", "")).lower() for row in payload.get("candidates", [])]
+            is_duplicate = "revenue" in new_text and any(
+                "geography" in candidate or "regions" in candidate for candidate in candidates
+            )
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": DuplicateCheck(
+                        is_duplicate=is_duplicate,
+                        reasoning="Semantic meaning aligns despite wording differences.",
+                    ),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    assert asyncio.run(
+        is_semantically_duplicate(
+            paraphrase,
+            [baseline],
+            NemoConfig(),
+            _FakeClient(),  # type: ignore[arg-type]
+            mode="question",
+        )
     )
 
-    recent_claims = [
-        "Revenue swings are mostly volume-driven with stable unit prices.",
-    ]
-    assert _is_duplicate_claim(
-        "Monthly revenue variation is primarily driven by volume while prices stay stable.",
-        recent_claims,
+
+def test_semantic_duplicate_lexical_fallback_without_client():
+    assert asyncio.run(
+        is_semantically_duplicate(
+            "Supplier X return rates are 2x higher than peers",
+            ["Supplier X has 2x higher return rates"],
+            NemoConfig(),
+            None,
+            mode="claim",
+        )
+    )
+    assert not asyncio.run(
+        is_semantically_duplicate(
+            "Revenue by region",
+            ["Customer count by segment"],
+            NemoConfig(),
+            None,
+            mode="question",
+        )
     )
 
 

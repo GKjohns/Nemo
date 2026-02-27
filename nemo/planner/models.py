@@ -107,6 +107,13 @@ class RerankedFrontier(BaseModel):
     rankings: list[RankedCandidate] = Field(default_factory=list)
 
 
+class DuplicateCheck(BaseModel):
+    """Structured duplicate classification for semantic stagnation checks."""
+
+    is_duplicate: bool = False
+    reasoning: str = ""
+
+
 class HypothesisRecord(BaseModel):
     """Backlog record for a testable claim discovered during exploration."""
 
