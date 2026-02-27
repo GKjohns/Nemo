@@ -4,10 +4,26 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+def _decode_json(raw: Any, *, default: Any) -> Any:
+    if isinstance(raw, str):
+        return json.loads(raw) if raw.strip() else default
+    if raw is None:
+        return default
+    return raw
+
+
+def _coerce_datetime(raw: Any) -> datetime:
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str):
+        return datetime.fromisoformat(raw)
+    return datetime.now(tz=timezone.utc)
 
 
 class FrontierItem(BaseModel):
@@ -30,20 +46,10 @@ class FrontierItem(BaseModel):
     def from_store_row(cls, row: dict) -> "FrontierItem":
         """Create a typed frontier item from a DB row dict."""
         payload_raw = row.get("payload_json", row.get("payload", {}))
-        if isinstance(payload_raw, str):
-            payload = json.loads(payload_raw) if payload_raw.strip() else {}
-        elif isinstance(payload_raw, dict):
-            payload = payload_raw
-        else:
+        payload = _decode_json(payload_raw, default={})
+        if not isinstance(payload, dict):
             payload = {}
-
-        created_at = row.get("created_at")
-        if isinstance(created_at, datetime):
-            created = created_at
-        elif isinstance(created_at, str):
-            created = datetime.fromisoformat(created_at)
-        else:
-            created = datetime.now(tz=timezone.utc)
+        created = _coerce_datetime(row.get("created_at"))
 
         return cls(
             action_id=str(row.get("action_id") or f"action_{uuid4().hex[:12]}"),
@@ -134,10 +140,12 @@ class HypothesisRecord(BaseModel):
     @classmethod
     def from_store_row(cls, row: dict) -> "HypothesisRecord":
         """Create a typed hypothesis record from a DB row dict."""
-        evidence_raw = row.get("evidence_chain", "[]")
-        tables_raw = row.get("tables_involved", "[]")
-        evidence_data = json.loads(evidence_raw) if isinstance(evidence_raw, str) and evidence_raw else evidence_raw
-        tables_data = json.loads(tables_raw) if isinstance(tables_raw, str) and tables_raw else tables_raw
+        evidence_data = _decode_json(row.get("evidence_chain", "[]"), default=[])
+        tables_data = _decode_json(row.get("tables_involved", "[]"), default=[])
+        if not isinstance(evidence_data, list):
+            evidence_data = []
+        if not isinstance(tables_data, list):
+            tables_data = []
         return cls(
             hypothesis_id=str(row.get("hypothesis_id") or f"hyp_{uuid4().hex[:12]}"),
             claim=str(row.get("claim", "")),
@@ -150,8 +158,8 @@ class HypothesisRecord(BaseModel):
             verdict_confidence=row.get("verdict_confidence"),
             validation_step=int(row.get("validation_step", 0) or 0),
             tables_involved=[str(item) for item in (tables_data or [])],
-            created_at=row.get("created_at") or datetime.now(tz=timezone.utc),
-            updated_at=row.get("updated_at") or datetime.now(tz=timezone.utc),
+            created_at=_coerce_datetime(row.get("created_at")),
+            updated_at=_coerce_datetime(row.get("updated_at")),
         )
 
 

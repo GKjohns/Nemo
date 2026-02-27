@@ -176,86 +176,45 @@ class NemoEngine:
                     started=started,
                 )
 
-            learning_ids: list[str] = []
-            thread_ids: list[str] = []
-            if self.config.use_learnings:
-                try:
-                    learning_ids = record_learnings(self.store, run_id)
-                except Exception:  # noqa: BLE001
-                    learning_ids = []
-            try:
-                thread_ids = update_thread_cards(self.store, self.config)
-            except Exception:  # noqa: BLE001
-                thread_ids = []
-
-            stats = self._stats_payload(steps_done, insights_created, errors, started)
-            if status == "interrupted":
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.RUN_INTERRUPTED,
-                        run_id=run_id,
-                        payload={
-                            "reason": "signal",
-                            "stats": stats,
-                            "learnings_recorded": len(learning_ids),
-                            "thread_cards_updated": len(thread_ids),
-                        },
-                    )
-                )
-            else:
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.RUN_COMPLETED,
-                        run_id=run_id,
-                        payload={
-                            "stats": stats,
-                            "learnings_recorded": len(learning_ids),
-                            "thread_cards_updated": len(thread_ids),
-                        },
-                    )
-                )
-            self.store.update_run(
-                run_id,
+            learning_count, thread_count = self._safe_post_run_updates(run_id)
+            await self._emit_run_terminal_event(
+                run_id=run_id,
                 status=status,
-                steps_completed=steps_done,
+                steps_done=steps_done,
                 insights_created=insights_created,
                 errors=errors,
-                frontier_size=self.store.count_frontier(status="queued"),
-                ended=True,
+                started=started,
+                learnings_recorded=learning_count,
+                thread_cards_updated=thread_count,
+            )
+            self._persist_run_completion(
+                run_id=run_id,
+                status=status,
+                steps_done=steps_done,
+                insights_created=insights_created,
+                errors=errors,
             )
             return run_id
 
         except KeyboardInterrupt:
             status = "interrupted"
-            learning_ids = []
-            thread_ids = []
-            if self.config.use_learnings:
-                try:
-                    learning_ids = record_learnings(self.store, run_id)
-                except Exception:  # noqa: BLE001
-                    pass
-            try:
-                thread_ids = update_thread_cards(self.store, self.config)
-            except Exception:  # noqa: BLE001
-                pass
-            stats = self._stats_payload(steps_done, insights_created, errors, started)
-            await self.bus.emit(
-                NemoEvent(
-                    type=EventType.RUN_INTERRUPTED,
-                    run_id=run_id,
-                    payload={
-                        "reason": "signal",
-                        "stats": stats,
-                        "learnings_recorded": len(learning_ids),
-                        "thread_cards_updated": len(thread_ids),
-                    },
-                )
+            learning_count, thread_count = self._safe_post_run_updates(run_id)
+            await self._emit_run_terminal_event(
+                run_id=run_id,
+                status=status,
+                steps_done=steps_done,
+                insights_created=insights_created,
+                errors=errors,
+                started=started,
+                learnings_recorded=learning_count,
+                thread_cards_updated=thread_count,
             )
-            self.store.update_run(
-                run_id, status=status,
-                steps_completed=steps_done, insights_created=insights_created,
-                errors=errors, frontier_size=self.store.count_frontier(status="queued"),
-                ended=True,
+            self._persist_run_completion(
+                run_id=run_id,
+                status=status,
+                steps_done=steps_done,
+                insights_created=insights_created,
+                errors=errors,
             )
             return run_id
 
@@ -386,101 +345,24 @@ class NemoEngine:
 
             steps_done += 1
 
-            # --- PLAN: ask the LLM what to investigate next ---
-            coverage_context = _build_coverage_context(notebook, all_tables, self.config.max_steps_per_theme)
-            frontier_hints = self._build_strategist_frontier_hints(notebook, profiles, joins)
-            validation_target: HypothesisRecord | None = None
-            if current_decision.phase == "explore":
-                planning_feedback_parts: list[str] = []
-                if force_diversify:
-                    planning_feedback_parts.append(
-                        "The prior steps are showing diminishing returns. "
-                        "Choose a materially different investigation touching a different table/theme."
-                    )
-                planning_feedback = "\n".join(planning_feedback_parts) if planning_feedback_parts else None
-                try:
-                    hypothesis = await plan_next_step(
-                        notebook,
-                        schema_ctx,
-                        self.config,
-                        self._llm_client,
-                        coverage_context=coverage_context,
-                        frontier_hints=frontier_hints,
-                        planning_feedback=planning_feedback,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    errors += 1
-                    await self.bus.emit(
-                        NemoEvent(
-                            type=EventType.STEP_ERROR,
-                            run_id=run_id,
-                            step_num=steps_done,
-                            payload={"phase": "planning", "error": str(exc), "will_retry": False},
-                        )
-                    )
-                    continue
-
-                if await is_semantically_duplicate(
-                    hypothesis.question,
-                    recent_questions[-8:],
-                    self.config,
-                    self._llm_client,
-                    mode="question",
-                ):
-                    try:
-                        hypothesis = await plan_next_step(
-                            notebook,
-                            schema_ctx,
-                            self.config,
-                            self._llm_client,
-                            coverage_context=coverage_context,
-                            frontier_hints=frontier_hints,
-                            planning_feedback=(
-                                "Your prior question is too similar to recent questions. "
-                                "Ask a genuinely different question, ideally on a different table."
-                            ),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                recent_questions = (recent_questions + [hypothesis.question])[-20:]
-            else:
-                if current_decision.hypothesis_id:
-                    validation_target = next(
-                        (h for h in hypotheses if h.hypothesis_id == current_decision.hypothesis_id),
-                        None,
-                    )
-                if validation_target is None:
-                    candidates = [h for h in hypotheses if h.status in {"proposed", "testing"}]
-                    validation_target = max(candidates, key=lambda h: float(h.priority)) if candidates else None
-                if validation_target is None:
-                    current_decision = PhaseDecision(
-                        phase="explore",
-                        reasoning="No eligible hypothesis found for exploit; continuing explore.",
-                    )
-                    continue
-
-                if validation_target.status == "proposed":
-                    validation_target.status = "testing"
-                validation_target.updated_at = datetime.now(tz=timezone.utc)
-                try:
-                    hypothesis = await plan_validation_step(
-                        hypothesis=validation_target,
-                        notebook=notebook,
-                        schema_context=schema_ctx,
-                        config=self.config,
-                        client=self._llm_client,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    errors += 1
-                    await self.bus.emit(
-                        NemoEvent(
-                            type=EventType.STEP_ERROR,
-                            run_id=run_id,
-                            step_num=steps_done,
-                            payload={"phase": "validation_planning", "error": str(exc), "will_retry": False},
-                        )
-                    )
-                    continue
+            hypothesis, validation_target, current_decision, recent_questions, planning_errors = (
+                await self._plan_strategist_step(
+                    run_id=run_id,
+                    step_num=steps_done,
+                    current_decision=current_decision,
+                    notebook=notebook,
+                    schema_ctx=schema_ctx,
+                    profiles=profiles,
+                    joins=joins,
+                    all_tables=all_tables,
+                    hypotheses=hypotheses,
+                    recent_questions=recent_questions,
+                    force_diversify=force_diversify,
+                )
+            )
+            errors += planning_errors
+            if hypothesis is None:
+                continue
 
             await self.bus.emit(
                 NemoEvent(
@@ -519,66 +401,27 @@ class NemoEngine:
                 )
             )
 
-            # --- EXECUTE ---
-            await self.bus.emit(
-                NemoEvent(
-                    type=EventType.STEP_PHASE,
-                    run_id=run_id, step_num=steps_done,
-                    payload={"phase": "executing", "sql": hypothesis.sql},
-                )
+            hypothesis, result, execute_errors, should_skip = await self._execute_strategist_step(
+                run_id=run_id,
+                step_num=steps_done,
+                hypothesis=hypothesis,
+                notebook=notebook,
+                schema_ctx=schema_ctx,
             )
-            result = execute_query(self.store, hypothesis.sql, self.config)
-
-            if result.error:
-                try:
-                    hypothesis = await plan_next_step(
-                        notebook, schema_ctx, self.config, self._llm_client,
-                        error_context={"error": result.error, "sql": hypothesis.sql},
-                    )
-                    result = execute_query(self.store, hypothesis.sql, self.config)
-                except Exception:  # noqa: BLE001
-                    pass
-
-            if result.error:
-                errors += 1
-                self.store.insert_learning(
-                    run_id=run_id, category="error_pattern",
-                    subject=f"STRATEGIST:{hypothesis.table}",
-                    detail=result.error, confidence=0.7,
-                )
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_ERROR,
-                        run_id=run_id, step_num=steps_done,
-                        payload={
-                            "phase": "executing", "error": result.error,
-                            "will_retry": False,
-                        },
-                    )
-                )
+            errors += execute_errors
+            if should_skip:
                 continue
 
-            # --- INTERPRET + UPDATE NOTEBOOK ---
-            await self.bus.emit(
-                NemoEvent(
-                    type=EventType.STEP_PHASE,
-                    run_id=run_id, step_num=steps_done,
-                    payload={"phase": "interpreting"},
-                )
+            interpretation, interpret_errors = await self._interpret_strategist_step(
+                run_id=run_id,
+                step_num=steps_done,
+                hypothesis=hypothesis,
+                result=result,
+                notebook=notebook,
+                schema_ctx=schema_ctx,
             )
-            try:
-                interpretation = await interpret_and_update(
-                    hypothesis, result, notebook, schema_ctx, self.config, self._llm_client,
-                )
-            except Exception as exc:  # noqa: BLE001
-                errors += 1
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_ERROR,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"phase": "interpreting", "error": str(exc), "will_retry": False},
-                    )
-                )
+            errors += interpret_errors
+            if interpretation is None:
                 continue
 
             # --- RECORD ---
@@ -721,13 +564,7 @@ class NemoEngine:
                 self.store.save_hypothesis(run_id, validation_target.model_dump(mode="json"))
 
             # --- LINK ---
-            await self.bus.emit(
-                NemoEvent(
-                    type=EventType.STEP_PHASE,
-                    run_id=run_id, step_num=steps_done,
-                    payload={"phase": "linking"},
-                )
-            )
+            await self._emit_step_phase(run_id, steps_done, "linking")
             edge_count = 0
             for edge in link_insight(self.store, full_insight, self.config, self._llm_client):
                 self.store.insert_edge(
@@ -778,27 +615,24 @@ class NemoEngine:
             )
 
             # --- EMIT STEP COMPLETED ---
-            await self.bus.emit(
-                NemoEvent(
-                    type=EventType.STEP_COMPLETED,
-                    run_id=run_id,
-                    step_num=steps_done,
-                    payload={
-                        "insight_id": insight_id,
-                        "title": interpretation.title,
-                        "question": hypothesis.question,
-                        "claim": interpretation.claim,
-                        "confidence": interpretation.confidence,
-                        "reasoning": interpretation.reasoning,
-                        "duration_ms": result.cost_ms,
-                        "edges_created": edge_count,
-                        "row_count": result.row_count,
-                        "effect_size": interpretation.effect_size,
-                        "tags": interpretation.tags,
-                        "sql": result.sql,
-                        "result_preview": result.rows[:5],
-                    },
-                )
+            await self._emit_step_completed(
+                run_id,
+                steps_done,
+                {
+                    "insight_id": insight_id,
+                    "title": interpretation.title,
+                    "question": hypothesis.question,
+                    "claim": interpretation.claim,
+                    "confidence": interpretation.confidence,
+                    "reasoning": interpretation.reasoning,
+                    "duration_ms": result.cost_ms,
+                    "edges_created": edge_count,
+                    "row_count": result.row_count,
+                    "effect_size": interpretation.effect_size,
+                    "tags": interpretation.tags,
+                    "sql": result.sql,
+                    "result_preview": result.rows[:5],
+                },
             )
 
             # Record in frontier for audit trail
@@ -814,9 +648,183 @@ class NemoEngine:
 
         return steps_done, insights_created, errors, status
 
-    def _build_strategist_frontier_hints(self, notebook: Notebook, profiles: list, joins: list) -> str:
-        """Build frontier suggestions to guide strategist breadth."""
-        recent_insights = self.store.get_recent_insights(limit=50)
+    async def _plan_strategist_step(
+        self,
+        *,
+        run_id: str,
+        step_num: int,
+        current_decision: PhaseDecision,
+        notebook: Notebook,
+        schema_ctx: str,
+        profiles: list,
+        joins: list,
+        all_tables: list[str],
+        hypotheses: list[HypothesisRecord],
+        recent_questions: list[str],
+        force_diversify: bool,
+    ) -> tuple[Hypothesis | None, HypothesisRecord | None, PhaseDecision, list[str], int]:
+        coverage_context = _build_coverage_context(notebook, all_tables, self.config.max_steps_per_theme)
+        frontier_hints = self._build_strategist_frontier_hints(notebook, profiles, joins)
+        validation_target: HypothesisRecord | None = None
+
+        if current_decision.phase == "explore":
+            planning_feedback_parts: list[str] = []
+            if force_diversify:
+                planning_feedback_parts.append(
+                    "The prior steps are showing diminishing returns. "
+                    "Choose a materially different investigation touching a different table/theme."
+                )
+            planning_feedback = "\n".join(planning_feedback_parts) if planning_feedback_parts else None
+            try:
+                hypothesis = await plan_next_step(
+                    notebook,
+                    schema_ctx,
+                    self.config,
+                    self._llm_client,
+                    coverage_context=coverage_context,
+                    frontier_hints=frontier_hints,
+                    planning_feedback=planning_feedback,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._emit_step_error(run_id, step_num, "planning", str(exc), will_retry=False)
+                return None, None, current_decision, recent_questions, 1
+
+            if await is_semantically_duplicate(
+                hypothesis.question,
+                recent_questions[-8:],
+                self.config,
+                self._llm_client,
+                mode="question",
+            ):
+                try:
+                    hypothesis = await plan_next_step(
+                        notebook,
+                        schema_ctx,
+                        self.config,
+                        self._llm_client,
+                        coverage_context=coverage_context,
+                        frontier_hints=frontier_hints,
+                        planning_feedback=(
+                            "Your prior question is too similar to recent questions. "
+                            "Ask a genuinely different question, ideally on a different table."
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            recent_questions = (recent_questions + [hypothesis.question])[-20:]
+            return hypothesis, None, current_decision, recent_questions, 0
+
+        if current_decision.hypothesis_id:
+            validation_target = next(
+                (h for h in hypotheses if h.hypothesis_id == current_decision.hypothesis_id),
+                None,
+            )
+        if validation_target is None:
+            candidates = [h for h in hypotheses if h.status in {"proposed", "testing"}]
+            validation_target = max(candidates, key=lambda h: float(h.priority)) if candidates else None
+        if validation_target is None:
+            return (
+                None,
+                None,
+                PhaseDecision(
+                    phase="explore",
+                    reasoning="No eligible hypothesis found for exploit; continuing explore.",
+                ),
+                recent_questions,
+                0,
+            )
+
+        if validation_target.status == "proposed":
+            validation_target.status = "testing"
+        validation_target.updated_at = datetime.now(tz=timezone.utc)
+        try:
+            hypothesis = await plan_validation_step(
+                hypothesis=validation_target,
+                notebook=notebook,
+                schema_context=schema_ctx,
+                config=self.config,
+                client=self._llm_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._emit_step_error(
+                run_id,
+                step_num,
+                "validation_planning",
+                str(exc),
+                will_retry=False,
+            )
+            return None, None, current_decision, recent_questions, 1
+        return hypothesis, validation_target, current_decision, recent_questions, 0
+
+    async def _execute_strategist_step(
+        self,
+        *,
+        run_id: str,
+        step_num: int,
+        hypothesis: Hypothesis,
+        notebook: Notebook,
+        schema_ctx: str,
+    ) -> tuple[Hypothesis, Any, int, bool]:
+        await self._emit_step_phase(run_id, step_num, "executing", sql=hypothesis.sql)
+        result = execute_query(self.store, hypothesis.sql, self.config)
+
+        if result.error:
+            try:
+                hypothesis = await plan_next_step(
+                    notebook,
+                    schema_ctx,
+                    self.config,
+                    self._llm_client,
+                    error_context={"error": result.error, "sql": hypothesis.sql},
+                )
+                result = execute_query(self.store, hypothesis.sql, self.config)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not result.error:
+            return hypothesis, result, 0, False
+
+        self.store.insert_learning(
+            run_id=run_id,
+            category="error_pattern",
+            subject=f"STRATEGIST:{hypothesis.table}",
+            detail=result.error,
+            confidence=0.7,
+        )
+        await self._emit_step_error(run_id, step_num, "executing", result.error, will_retry=False)
+        return hypothesis, result, 1, True
+
+    async def _interpret_strategist_step(
+        self,
+        *,
+        run_id: str,
+        step_num: int,
+        hypothesis: Hypothesis,
+        result: Any,
+        notebook: Notebook,
+        schema_ctx: str,
+    ) -> tuple[InterpretationResult | None, int]:
+        await self._emit_step_phase(run_id, step_num, "interpreting")
+        try:
+            interpretation = await interpret_and_update(
+                hypothesis,
+                result,
+                notebook,
+                schema_ctx,
+                self.config,
+                self._llm_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._emit_step_error(run_id, step_num, "interpreting", str(exc), will_retry=False)
+            return None, 1
+        return interpretation, 0
+
+    def _build_frontier_candidates(
+        self,
+        profiles: list,
+        joins: list,
+        recent_insights: list[dict[str, Any]],
+    ) -> tuple[GeneratorContext, list[FrontierItem], list[FrontierItem], list[FrontierItem]]:
         ctx = GeneratorContext(
             store=self.store,
             profiles=profiles,
@@ -824,7 +832,7 @@ class NemoEngine:
             join_candidates=joins,
             config=self.config,
         )
-        generated = []
+        generated: list[FrontierItem] = []
         for generator in get_all_generators(Path(".nemo/generators")):
             try:
                 generated.extend(generator(ctx))
@@ -835,9 +843,15 @@ class NemoEngine:
             existing_keys=self.store.get_frontier_existing_keys(),
             recent_insight_keys=derive_recent_insight_keys(recent_insights),
         )
+        scored = score_frontier(deduped, ctx)
+        return ctx, generated, deduped, scored
+
+    def _build_strategist_frontier_hints(self, notebook: Notebook, profiles: list, joins: list) -> str:
+        """Build frontier suggestions to guide strategist breadth."""
+        recent_insights = self.store.get_recent_insights(limit=50)
+        ctx, _, deduped, scored = self._build_frontier_candidates(profiles, joins, recent_insights)
         if not deduped:
             return "(no deterministic suggestions)"
-        scored = score_frontier(deduped, ctx)
         ranked, _ = rerank_frontier(scored, notebook, self.config, self._llm_client, top_n=8)
         ranked = ranked[:8]
         lines: list[str] = []
@@ -929,42 +943,24 @@ class NemoEngine:
                 continue
 
             try:
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_PHASE,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"phase": "compiling"},
-                    )
-                )
+                await self._emit_step_phase(run_id, steps_done, "compiling")
                 sql = compile_action(item, profiles, joins)
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_PHASE,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"phase": "executing", "sql": sql},
-                    )
-                )
+                await self._emit_step_phase(run_id, steps_done, "executing", sql=sql)
                 result = execute_query(self.store, sql, self.config)
                 if result.error:
                     errors += 1
                     self.store.update_frontier_status(item.action_id, "error", result.error)
-                    await self.bus.emit(
-                        NemoEvent(
-                            type=EventType.STEP_ERROR,
-                            run_id=run_id, step_num=steps_done,
-                            payload={"action_id": item.action_id, "phase": "executing",
-                                     "error": result.error, "will_retry": False},
-                        )
+                    await self._emit_step_error(
+                        run_id,
+                        steps_done,
+                        "executing",
+                        result.error,
+                        will_retry=False,
+                        action_id=item.action_id,
                     )
                     continue
 
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_PHASE,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"phase": "summarizing"},
-                    )
-                )
+                await self._emit_step_phase(run_id, steps_done, "summarizing")
                 draft = await summarize_result(
                     action=item, result=result, profiles=profiles,
                     recent_insights=self.store.get_recent_insights(limit=20),
@@ -989,13 +985,7 @@ class NemoEngine:
                               step_num=steps_done, payload=full_insight)
                 )
 
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_PHASE,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"phase": "linking"},
-                    )
-                )
+                await self._emit_step_phase(run_id, steps_done, "linking")
                 edge_count = 0
                 for edge in link_insight(self.store, full_insight, self.config, self._llm_client):
                     self.store.insert_edge(
@@ -1017,25 +1007,23 @@ class NemoEngine:
                         )
                     )
                 self.store.update_frontier_status(item.action_id, "done")
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_COMPLETED,
-                        run_id=run_id, step_num=steps_done,
-                        payload={
-                            "insight_id": insight_id,
-                            "title": draft.title,
-                            "question": draft.question,
-                            "claim": draft.claim,
-                            "confidence": draft.confidence,
-                            "duration_ms": result.cost_ms,
-                            "edges_created": edge_count,
-                            "row_count": result.row_count,
-                            "effect_size": draft.effect_size,
-                            "tags": draft.tags,
-                            "sql": result.sql,
-                            "result_preview": result.rows[:5],
-                        },
-                    )
+                await self._emit_step_completed(
+                    run_id,
+                    steps_done,
+                    {
+                        "insight_id": insight_id,
+                        "title": draft.title,
+                        "question": draft.question,
+                        "claim": draft.claim,
+                        "confidence": draft.confidence,
+                        "duration_ms": result.cost_ms,
+                        "edges_created": edge_count,
+                        "row_count": result.row_count,
+                        "effect_size": draft.effect_size,
+                        "tags": draft.tags,
+                        "sql": result.sql,
+                        "result_preview": result.rows[:5],
+                    },
                 )
                 if steps_done % max(1, int(self.config.reflect_every)) == 0:
                     updated_memory = load_working_memory(self.store, self.config, run_id)
@@ -1051,13 +1039,13 @@ class NemoEngine:
             except Exception as exc:  # noqa: BLE001
                 errors += 1
                 self.store.update_frontier_status(item.action_id, "error", str(exc))
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_ERROR,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"action_id": item.action_id, "phase": "unknown",
-                                 "error": str(exc), "will_retry": False},
-                    )
+                await self._emit_step_error(
+                    run_id,
+                    steps_done,
+                    "unknown",
+                    str(exc),
+                    will_retry=False,
+                    action_id=item.action_id,
                 )
 
         return steps_done, insights_created, errors, status
@@ -1071,23 +1059,11 @@ class NemoEngine:
         profiles: list, joins: list,
         plan_only: bool = False,
     ) -> dict[str, Any]:
-        ctx = GeneratorContext(
-            store=self.store, profiles=profiles,
-            recent_insights=memory["recent_insights"],
-            join_candidates=joins, config=self.config,
+        ctx, generated, deduped, scored = self._build_frontier_candidates(
+            profiles,
+            joins,
+            memory["recent_insights"],
         )
-        generated = []
-        for generator in get_all_generators(Path(".nemo/generators")):
-            try:
-                generated.extend(generator(ctx))
-            except Exception:  # noqa: BLE001
-                continue
-        deduped = dedupe_frontier(
-            generated,
-            existing_keys=self.store.get_frontier_existing_keys(),
-            recent_insight_keys=derive_recent_insight_keys(memory["recent_insights"]),
-        )
-        scored = score_frontier(deduped, ctx)
         notebook = self._load_or_create_notebook(run_id)
         reranked, deterministic_top = rerank_frontier(
             scored,
@@ -1136,6 +1112,108 @@ class NemoEngine:
             "errors": errors, "duration_ms": int((time.perf_counter() - started) * 1000),
             "frontier_remaining": self.store.count_frontier(status="queued"),
         }
+
+    async def _emit_step_phase(self, run_id: str, step_num: int, phase: str, **payload: Any) -> None:
+        phase_payload = {"phase": phase}
+        phase_payload.update(payload)
+        await self.bus.emit(
+            NemoEvent(
+                type=EventType.STEP_PHASE,
+                run_id=run_id,
+                step_num=step_num,
+                payload=phase_payload,
+            )
+        )
+
+    async def _emit_step_error(
+        self,
+        run_id: str,
+        step_num: int,
+        phase: str,
+        error: str,
+        *,
+        will_retry: bool,
+        action_id: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"phase": phase, "error": error, "will_retry": will_retry}
+        if action_id is not None:
+            payload["action_id"] = action_id
+        await self.bus.emit(
+            NemoEvent(
+                type=EventType.STEP_ERROR,
+                run_id=run_id,
+                step_num=step_num,
+                payload=payload,
+            )
+        )
+
+    async def _emit_step_completed(self, run_id: str, step_num: int, payload: dict[str, Any]) -> None:
+        await self.bus.emit(
+            NemoEvent(
+                type=EventType.STEP_COMPLETED,
+                run_id=run_id,
+                step_num=step_num,
+                payload=payload,
+            )
+        )
+
+    def _safe_post_run_updates(self, run_id: str) -> tuple[int, int]:
+        learning_count = 0
+        thread_count = 0
+        if self.config.use_learnings:
+            try:
+                learning_count = len(record_learnings(self.store, run_id))
+            except Exception:  # noqa: BLE001
+                learning_count = 0
+        try:
+            thread_count = len(update_thread_cards(self.store, self.config))
+        except Exception:  # noqa: BLE001
+            thread_count = 0
+        return learning_count, thread_count
+
+    async def _emit_run_terminal_event(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        steps_done: int,
+        insights_created: int,
+        errors: int,
+        started: float,
+        learnings_recorded: int,
+        thread_cards_updated: int,
+    ) -> None:
+        stats = self._stats_payload(steps_done, insights_created, errors, started)
+        payload = {
+            "stats": stats,
+            "learnings_recorded": learnings_recorded,
+            "thread_cards_updated": thread_cards_updated,
+        }
+        if status == "interrupted":
+            payload["reason"] = "signal"
+            event_type = EventType.RUN_INTERRUPTED
+        else:
+            event_type = EventType.RUN_COMPLETED
+        await self.bus.emit(NemoEvent(type=event_type, run_id=run_id, payload=payload))
+
+    def _persist_run_completion(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        steps_done: int,
+        insights_created: int,
+        errors: int,
+    ) -> None:
+        self.store.update_run(
+            run_id,
+            status=status,
+            steps_completed=steps_done,
+            insights_created=insights_created,
+            errors=errors,
+            frontier_size=self.store.count_frontier(status="queued"),
+            ended=True,
+        )
 
 
 def _has_blocking_hook(raw_results: list[Any]) -> bool:
