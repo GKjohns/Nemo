@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -73,3 +74,60 @@ class FrontierItem(BaseModel):
             "depends_on_action_id": self.depends_on_action_id,
             "dedupe_key": self.dedupe_key,
         }
+
+
+class EvidenceLink(BaseModel):
+    """Evidence item collected while validating a hypothesis."""
+
+    insight_id: str
+    relationship: Literal["supports", "contradicts", "narrows", "confounds"]
+    note: str
+
+
+class HypothesisRecord(BaseModel):
+    """Backlog record for a testable claim discovered during exploration."""
+
+    hypothesis_id: str = Field(default_factory=lambda: f"hyp_{uuid4().hex[:12]}")
+    claim: str
+    source_insight_id: str
+    initial_confidence: float
+    status: Literal["proposed", "testing", "validated", "invalidated", "narrowed", "inconclusive"] = "proposed"
+    priority: float = 0.0
+    evidence_chain: list[EvidenceLink] = Field(default_factory=list)
+    verdict: str | None = None
+    verdict_confidence: float | None = None
+    validation_step: int = 0
+    tables_involved: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    @classmethod
+    def from_store_row(cls, row: dict) -> "HypothesisRecord":
+        """Create a typed hypothesis record from a DB row dict."""
+        evidence_raw = row.get("evidence_chain", "[]")
+        tables_raw = row.get("tables_involved", "[]")
+        evidence_data = json.loads(evidence_raw) if isinstance(evidence_raw, str) and evidence_raw else evidence_raw
+        tables_data = json.loads(tables_raw) if isinstance(tables_raw, str) and tables_raw else tables_raw
+        return cls(
+            hypothesis_id=str(row.get("hypothesis_id") or f"hyp_{uuid4().hex[:12]}"),
+            claim=str(row.get("claim", "")),
+            source_insight_id=str(row.get("source_insight_id", "")),
+            initial_confidence=float(row.get("initial_confidence", 0.0) or 0.0),
+            status=str(row.get("status", "proposed")),
+            priority=float(row.get("priority", 0.0) or 0.0),
+            evidence_chain=[EvidenceLink.model_validate(item) for item in (evidence_data or [])],
+            verdict=row.get("verdict"),
+            verdict_confidence=row.get("verdict_confidence"),
+            validation_step=int(row.get("validation_step", 0) or 0),
+            tables_involved=[str(item) for item in (tables_data or [])],
+            created_at=row.get("created_at") or datetime.now(tz=timezone.utc),
+            updated_at=row.get("updated_at") or datetime.now(tz=timezone.utc),
+        )
+
+
+class PhaseDecision(BaseModel):
+    """Outer-loop phase decision for explore/exploit control."""
+
+    phase: Literal["explore", "exploit"]
+    hypothesis_id: str | None = None
+    reasoning: str

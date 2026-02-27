@@ -64,6 +64,8 @@ class InterpretationResult(BaseModel):
     new_finding: str
     new_open_questions: list[str] = Field(default_factory=list)
     resolved_questions: list[str] = Field(default_factory=list)
+    proposed_hypothesis: str | None = None
+    hypothesis_confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +194,11 @@ tautological), set confidence ≤ 0.3. High confidence (0.7+) requires a non-obv
 with clear business meaning.
 3. **Update notebook**: Either extend an existing theme or create a new one. Add the key finding \
 and any new questions this raises. Mark any questions that were answered.
+4. **Propose hypothesis**: If this finding suggests a specific, testable hypothesis worth validating \
+later, include it. Otherwise leave it null.
 
 Return a JSON object (no markdown fences):
-{{"title": "Short finding title (≤10 words)", "claim": "1-2 sentence finding with specific numbers", "confidence": 0.0-1.0, "effect_size": null, "tags": ["tag1", "tag2"], "reasoning": "How this finding connects to prior discoveries and what it means for the investigation (2-3 sentences)", "theme": "Theme name to update or create", "summary_update": "Updated 2-3 sentence summary for this theme", "new_finding": "One-line key finding to add to the theme", "new_open_questions": ["New question raised by this finding"], "resolved_questions": ["Question from notebook that this answered"]}}"""
+{{"title": "Short finding title (≤10 words)", "claim": "1-2 sentence finding with specific numbers", "confidence": 0.0-1.0, "effect_size": null, "tags": ["tag1", "tag2"], "reasoning": "How this finding connects to prior discoveries and what it means for the investigation (2-3 sentences)", "theme": "Theme name to update or create", "summary_update": "Updated 2-3 sentence summary for this theme", "new_finding": "One-line key finding to add to the theme", "new_open_questions": ["New question raised by this finding"], "resolved_questions": ["Question from notebook that this answered"], "proposed_hypothesis": null, "hypothesis_confidence": null}}"""
 
 INTERPRETER_EMPTY_USER = """\
 ## Your Investigation Notebook
@@ -320,10 +324,14 @@ async def interpret_and_update(
             if response.output_parsed is not None:
                 parsed = response.output_parsed
                 parsed.confidence = max(0.0, min(1.0, parsed.confidence))
+                if parsed.hypothesis_confidence is not None:
+                    parsed.hypothesis_confidence = max(0.0, min(1.0, parsed.hypothesis_confidence))
                 return parsed
             raw = _extract_text(response)
             parsed = _parse_json_as(raw, InterpretationResult)
             parsed.confidence = max(0.0, min(1.0, parsed.confidence))
+            if parsed.hypothesis_confidence is not None:
+                parsed.hypothesis_confidence = max(0.0, min(1.0, parsed.hypothesis_confidence))
             return parsed
         except (APIConnectionError, APITimeoutError):
             if attempt == 2:

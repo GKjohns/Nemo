@@ -26,7 +26,7 @@ from nemo.planner import (
     score_frontier,
     select_next,
 )
-from nemo.planner.models import FrontierItem
+from nemo.planner.models import FrontierItem, HypothesisRecord
 from nemo.planner.strategist import (
     Hypothesis,
     InterpretationResult,
@@ -280,6 +280,7 @@ class NemoEngine:
 
         schema_ctx = build_schema_context(profiles)
         notebook = self._load_or_create_notebook(run_id)
+        hypotheses = self._load_hypotheses(run_id)
         all_tables = [p.name for p in profiles]
         recent_questions: list[str] = []
         recent_claims: list[str] = []
@@ -503,6 +504,50 @@ class NemoEngine:
                           payload=full_insight)
             )
 
+            proposed_claim = (interpretation.proposed_hypothesis or "").strip()
+            if proposed_claim:
+                proposed_tables = sorted({
+                    *source_tables,
+                    *[
+                        str(tag)
+                        for tag in (interpretation.tags or [])
+                        if "." not in str(tag) and str(tag).isidentifier()
+                    ],
+                })
+                hypothesis_record = HypothesisRecord(
+                    claim=proposed_claim,
+                    source_insight_id=insight_id,
+                    initial_confidence=(
+                        interpretation.hypothesis_confidence
+                        if interpretation.hypothesis_confidence is not None
+                        else interpretation.confidence
+                    ),
+                    priority=float(
+                        interpretation.hypothesis_confidence
+                        if interpretation.hypothesis_confidence is not None
+                        else interpretation.confidence
+                    ),
+                    tables_involved=proposed_tables,
+                )
+                hypotheses.append(hypothesis_record)
+                self.store.save_hypothesis(run_id, hypothesis_record.model_dump(mode="json"))
+                await self.bus.emit(
+                    NemoEvent(
+                        type=EventType.HYPOTHESIS_PROPOSED,
+                        run_id=run_id,
+                        step_num=steps_done,
+                        payload={
+                            "hypothesis_id": hypothesis_record.hypothesis_id,
+                            "claim": hypothesis_record.claim,
+                            "source_insight_id": hypothesis_record.source_insight_id,
+                            "initial_confidence": hypothesis_record.initial_confidence,
+                            "status": hypothesis_record.status,
+                            "priority": hypothesis_record.priority,
+                            "tables_involved": hypothesis_record.tables_involved,
+                        },
+                    )
+                )
+
             # --- LINK ---
             await self.bus.emit(
                 NemoEvent(
@@ -629,6 +674,16 @@ class NemoEngine:
             except Exception:  # noqa: BLE001
                 pass
         return Notebook()
+
+    def _load_hypotheses(self, run_id: str) -> list[HypothesisRecord]:
+        rows = self.store.load_hypotheses(run_id)
+        loaded: list[HypothesisRecord] = []
+        for row in rows:
+            try:
+                loaded.append(HypothesisRecord.from_store_row(row))
+            except Exception:  # noqa: BLE001
+                continue
+        return loaded
 
     # ------------------------------------------------------------------
     # Legacy loop (fallback when no LLM client)

@@ -93,3 +93,6 @@ supabase/.temp/
 # Nemo local state (DuckDB)
 nemo.duckdb
 nemo.duckdb*
+
+# Local large dataset snapshot
+docs/nyc_city_payroll_20260227.csv

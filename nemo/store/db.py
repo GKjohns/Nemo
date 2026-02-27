@@ -20,6 +20,7 @@ SYSTEM_TABLES = (
     "thread_cards",
     "notebooks",
     "learnings",
+    "hypotheses",
 )
 
 
@@ -259,6 +260,91 @@ class NemoStore:
         )
         return learning_id
 
+    def save_hypothesis(self, run_id: str, hypothesis: str | dict[str, Any]) -> None:
+        payload: dict[str, Any]
+        if isinstance(hypothesis, str):
+            payload = json.loads(hypothesis)
+        else:
+            payload = dict(hypothesis)
+
+        hypothesis_id = str(payload.get("hypothesis_id", ""))
+        if not hypothesis_id:
+            raise ValueError("hypothesis_id is required")
+
+        existing = self.execute(
+            "SELECT hypothesis_id FROM hypotheses WHERE hypothesis_id = ? LIMIT 1",
+            [hypothesis_id],
+        ).fetchone()
+        if existing:
+            self.execute(
+                """
+                UPDATE hypotheses
+                SET run_id = ?, claim = ?, source_insight_id = ?, initial_confidence = ?,
+                    status = ?, priority = ?, evidence_chain = ?, verdict = ?,
+                    verdict_confidence = ?, validation_step = ?, tables_involved = ?,
+                    updated_at = now()
+                WHERE hypothesis_id = ?
+                """,
+                [
+                    run_id,
+                    str(payload.get("claim", "")),
+                    str(payload.get("source_insight_id", "")),
+                    float(payload.get("initial_confidence", 0.0) or 0.0),
+                    str(payload.get("status", "proposed")),
+                    float(payload.get("priority", 0.0) or 0.0),
+                    _json_or_none(payload.get("evidence_chain", [])),
+                    payload.get("verdict"),
+                    payload.get("verdict_confidence"),
+                    int(payload.get("validation_step", 0) or 0),
+                    _json_or_none(payload.get("tables_involved", [])),
+                    hypothesis_id,
+                ],
+            )
+            return
+
+        self.execute(
+            """
+            INSERT INTO hypotheses (
+                hypothesis_id, run_id, claim, source_insight_id, initial_confidence,
+                status, priority, evidence_chain, verdict, verdict_confidence,
+                validation_step, tables_involved
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                hypothesis_id,
+                run_id,
+                str(payload.get("claim", "")),
+                str(payload.get("source_insight_id", "")),
+                float(payload.get("initial_confidence", 0.0) or 0.0),
+                str(payload.get("status", "proposed")),
+                float(payload.get("priority", 0.0) or 0.0),
+                _json_or_none(payload.get("evidence_chain", [])),
+                payload.get("verdict"),
+                payload.get("verdict_confidence"),
+                int(payload.get("validation_step", 0) or 0),
+                _json_or_none(payload.get("tables_involved", [])),
+            ],
+        )
+
+    def load_hypotheses(self, run_id: str) -> list[dict[str, Any]]:
+        return self._query_dicts(
+            """
+            SELECT *
+            FROM hypotheses
+            WHERE run_id = ?
+            ORDER BY created_at ASC
+            """,
+            [run_id],
+        )
+
+    def get_hypothesis(self, hypothesis_id: str) -> dict[str, Any] | None:
+        rows = self._query_dicts(
+            "SELECT * FROM hypotheses WHERE hypothesis_id = ? LIMIT 1",
+            [hypothesis_id],
+        )
+        return rows[0] if rows else None
+
     def get_frontier_queue(self, status: str = "queued", limit: int = 50) -> list[dict[str, Any]]:
         return self._query_dicts(
             """
@@ -392,6 +478,24 @@ class NemoStore:
         """Additive migrations for existing databases."""
         migrations = [
             "ALTER TABLE insights ADD COLUMN reasoning VARCHAR",
+            """
+            CREATE TABLE IF NOT EXISTS hypotheses (
+                hypothesis_id      VARCHAR PRIMARY KEY,
+                run_id             VARCHAR NOT NULL,
+                claim              VARCHAR NOT NULL,
+                source_insight_id  VARCHAR,
+                initial_confidence DOUBLE,
+                status             VARCHAR NOT NULL DEFAULT 'proposed',
+                priority           DOUBLE NOT NULL DEFAULT 0.0,
+                evidence_chain     VARCHAR,
+                verdict            VARCHAR,
+                verdict_confidence DOUBLE,
+                validation_step    INTEGER NOT NULL DEFAULT 0,
+                tables_involved    VARCHAR,
+                created_at         TIMESTAMP NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMP NOT NULL DEFAULT now()
+            )
+            """,
         ]
         for sql in migrations:
             try:

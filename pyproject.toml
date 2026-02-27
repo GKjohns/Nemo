@@ -26,3 +26,11 @@ include = ["nemo*"]
 
 [tool.setuptools.package-data]
 nemo = ["store/schema.sql"]
+
+[tool.pytest.ini_options]
+addopts = "-q -m 'not slow'"
+markers = [
+    "slow: long-running tests (e.g., end-to-end/golden flows)",
+    "e2e: end-to-end integration tests",
+    "llm: tests that may invoke external LLM APIs",
+]

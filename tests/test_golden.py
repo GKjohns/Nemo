@@ -15,6 +15,8 @@ from nemo.ingest.add import add_tpch
 from nemo.report import generate_brief_markdown
 from nemo.store import NemoStore
 
+pytestmark = [pytest.mark.slow, pytest.mark.e2e, pytest.mark.llm]
+
 
 def _make_config(**overrides) -> NemoConfig:
     """Build a NemoConfig that picks up OPENAI_API_KEY from env."""

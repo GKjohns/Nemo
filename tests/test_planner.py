@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from nemo.config import NemoConfig
 from nemo.engine import _build_coverage_context, _is_duplicate_claim, _is_duplicate_question
+from nemo.executor.run import ExecutionResult
 from nemo.ingest.profile import ColumnProfile, TableProfile
 from nemo.planner import (
     GeneratorContext,
@@ -16,12 +18,14 @@ from nemo.planner import (
     select_next,
 )
 from nemo.planner.strategist import (
+    Hypothesis,
     InterpretationResult,
     Notebook,
     NotebookEntry,
     apply_notebook_update,
     build_schema_context,
     format_notebook,
+    interpret_and_update,
 )
 
 
@@ -405,3 +409,68 @@ def _col(
         p50=None,
         p75=None,
     )
+
+
+def test_interpretation_can_propose_hypothesis():
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.last_input = None
+
+        def parse(self, **kwargs):
+            self.last_input = kwargs.get("input")
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": InterpretationResult(
+                        title="Returns anomaly",
+                        claim="Supplier X shows ~2x return rate versus baseline.",
+                        confidence=0.81,
+                        reasoning="This appears materially above peer suppliers and worth direct validation.",
+                        theme="Quality",
+                        summary_update="Quality theme now includes a likely supplier-specific return issue.",
+                        new_finding="Supplier X return rate is roughly double baseline.",
+                        new_open_questions=["Does this hold across customer segments?"],
+                        resolved_questions=[],
+                        proposed_hypothesis="Supplier X has 2x higher return rates than market average.",
+                        hypothesis_confidence=0.78,
+                    ),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    fake_client = _FakeClient()
+    hypothesis = Hypothesis(
+        question="Do any suppliers have unusually high return rates?",
+        reasoning="Quality outliers are a high-impact risk.",
+        sql='SELECT "supplier", AVG("is_returned") AS return_rate FROM "orders" GROUP BY 1',
+        table="orders",
+    )
+    result = ExecutionResult(
+        sql=hypothesis.sql,
+        rows=[{"supplier": "X", "return_rate": 0.24}],
+        row_count=1,
+        column_names=["supplier", "return_rate"],
+        truncated=False,
+        cost_ms=12,
+        error=None,
+    )
+    notebook = Notebook()
+    parsed = asyncio.run(
+        interpret_and_update(
+            hypothesis=hypothesis,
+            result=result,
+            notebook=notebook,
+            schema_context="orders(supplier, is_returned)",
+            config=NemoConfig(),
+            client=fake_client,  # type: ignore[arg-type]
+        )
+    )
+    assert parsed.proposed_hypothesis == "Supplier X has 2x higher return rates than market average."
+    assert parsed.hypothesis_confidence == 0.78
+    prompt = str(fake_client.responses.last_input)
+    assert "specific, testable hypothesis" in prompt

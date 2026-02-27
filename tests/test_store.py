@@ -103,3 +103,41 @@ def test_store_serializes_decimal_payloads(store):
     sample = json.loads(row[1])
     assert summary["value"] == 12.5
     assert sample[0]["amount"] == 42
+
+
+def test_hypothesis_crud_round_trip(store):
+    run_id = store.insert_run({"mode": "hypothesis-test"})
+    hypothesis = {
+        "hypothesis_id": "hyp_test_001",
+        "claim": "Supplier X has elevated return rate.",
+        "source_insight_id": "insight_abc",
+        "initial_confidence": 0.72,
+        "status": "proposed",
+        "priority": 0.72,
+        "evidence_chain": [{"insight_id": "insight_abc", "relationship": "supports", "note": "Initial signal"}],
+        "validation_step": 0,
+        "tables_involved": ["orders", "returns"],
+    }
+
+    store.save_hypothesis(run_id, hypothesis)
+    loaded = store.load_hypotheses(run_id)
+    assert len(loaded) == 1
+    assert loaded[0]["hypothesis_id"] == "hyp_test_001"
+    assert loaded[0]["claim"] == "Supplier X has elevated return rate."
+    assert json.loads(loaded[0]["tables_involved"]) == ["orders", "returns"]
+
+    store.save_hypothesis(
+        run_id,
+        {
+            **hypothesis,
+            "status": "validated",
+            "verdict": "Validated across multiple regions.",
+            "verdict_confidence": 0.86,
+            "validation_step": 3,
+        },
+    )
+    by_id = store.get_hypothesis("hyp_test_001")
+    assert by_id is not None
+    assert by_id["status"] == "validated"
+    assert by_id["validation_step"] == 3
+    assert by_id["verdict_confidence"] == 0.86

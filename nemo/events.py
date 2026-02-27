@@ -37,6 +37,10 @@ class EventType(str, Enum):
 
     # Strategist events
     HYPOTHESIS_FORMED = "hypothesis:formed"
+    HYPOTHESIS_PROPOSED = "hypothesis:proposed"
+    HYPOTHESIS_VERDICT = "hypothesis:verdict"
+    PHASE_DECIDED = "phase:decided"
+    VALIDATION_STEP = "validation:step"
     NOTEBOOK_UPDATED = "notebook:updated"
 
     # Internal state

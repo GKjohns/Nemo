@@ -103,3 +103,21 @@ CREATE TABLE IF NOT EXISTS learnings (
     confidence       DOUBLE NOT NULL DEFAULT 0.5,
     times_confirmed  INTEGER NOT NULL DEFAULT 1
 );
+
+-- 9) hypotheses (per-run backlog of testable claims)
+CREATE TABLE IF NOT EXISTS hypotheses (
+    hypothesis_id      VARCHAR PRIMARY KEY,
+    run_id             VARCHAR NOT NULL,
+    claim              VARCHAR NOT NULL,
+    source_insight_id  VARCHAR,
+    initial_confidence DOUBLE,
+    status             VARCHAR NOT NULL DEFAULT 'proposed',
+    priority           DOUBLE NOT NULL DEFAULT 0.0,
+    evidence_chain     VARCHAR,
+    verdict            VARCHAR,
+    verdict_confidence DOUBLE,
+    validation_step    INTEGER NOT NULL DEFAULT 0,
+    tables_involved    VARCHAR,
+    created_at         TIMESTAMP NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMP NOT NULL DEFAULT now()
+);
