@@ -84,6 +84,15 @@ class EvidenceLink(BaseModel):
     note: str
 
 
+class EdgeClassification(BaseModel):
+    """Structured relationship classification between two insights."""
+
+    to_insight_id: str
+    relationship: Literal["supports", "contradicts", "refines", "depends_on", "none"] = "none"
+    confidence: float = 0.0
+    rationale: str = ""
+
+
 class HypothesisRecord(BaseModel):
     """Backlog record for a testable claim discovered during exploration."""
 

@@ -3,16 +3,87 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
+from pydantic import BaseModel, Field
+
 from nemo.config import NemoConfig
+from nemo.planner.models import EdgeClassification
 from nemo.store import NemoStore
 
 
-def link_insight(store: NemoStore, new_insight: dict[str, Any], config: NemoConfig) -> list[dict[str, Any]]:
+class EdgeClassificationBatch(BaseModel):
+    """LLM response model for a candidate edge classification batch."""
+
+    edges: list[EdgeClassification] = Field(default_factory=list)
+
+
+def link_insight(
+    store: NemoStore,
+    new_insight: dict[str, Any],
+    config: NemoConfig,
+    client: OpenAI | None = None,
+) -> list[dict[str, Any]]:
     """Link a new insight to recent insights using simple claim heuristics."""
     _ = config
-    recent = store.get_recent_insights(limit=50)
+    recent = store.get_recent_insights(limit=20)
+    if client is not None:
+        try:
+            return classify_edge_batch(new_insight, recent, client)
+        except Exception:  # noqa: BLE001
+            pass
+    return _link_insight_heuristic(new_insight, recent)
+
+
+def classify_edge_batch(
+    new_insight: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    client: OpenAI,
+    *,
+    batch_size: int = 20,
+) -> list[dict[str, Any]]:
+    """Classify edges in batches using an LLM and return graph edge records."""
+    new_id = str(new_insight.get("insight_id"))
+    if not new_id:
+        return []
+    prior = [item for item in candidates if str(item.get("insight_id")) and str(item.get("insight_id")) != new_id]
+    if not prior:
+        return []
+
+    batch = max(1, int(batch_size))
+    results: list[dict[str, Any]] = []
+    for idx in range(0, len(prior), batch):
+        chunk = prior[idx : idx + batch]
+        parsed = _classify_batch_llm(new_insight, chunk, client)
+        for edge in parsed.edges:
+            candidate_id = edge.to_insight_id.strip()
+            if not candidate_id or edge.relationship == "none":
+                continue
+            if candidate_id not in {str(item.get("insight_id")) for item in chunk}:
+                continue
+            confidence = max(0.0, min(1.0, float(edge.confidence)))
+            results.append(
+                {
+                    "from_insight_id": new_id,
+                    "to_insight_id": candidate_id,
+                    "type": edge.relationship,
+                    "weight": 0.4 + (0.5 * confidence),
+                    "rationale": edge.rationale.strip() or f"auto-link via {edge.relationship} llm",
+                }
+            )
+    # De-dupe by (from,to,type); keep highest-weight edge.
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for edge in results:
+        key = (str(edge["from_insight_id"]), str(edge["to_insight_id"]), str(edge["type"]))
+        if key not in deduped or float(edge["weight"]) > float(deduped[key]["weight"]):
+            deduped[key] = edge
+    results = list(deduped.values())
+    return results
+
+
+def _link_insight_heuristic(new_insight: dict[str, Any], recent: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     new_id = str(new_insight.get("insight_id"))
     new_claim = _json_dict(new_insight.get("claim_struct_json"))
@@ -34,6 +105,55 @@ def link_insight(store: NemoStore, new_insight: dict[str, Any], config: NemoConf
             }
         )
     return results
+
+
+def _classify_batch_llm(
+    new_insight: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    client: OpenAI,
+) -> EdgeClassificationBatch:
+    instructions = (
+        "Classify relationships between a new analytics insight and prior insights. "
+        "Allowed relationship values: supports, contradicts, refines, depends_on, none. "
+        "Use none when there is no meaningful relation. "
+        "Return concise rationale and confidence between 0 and 1 for each candidate."
+    )
+    payload = {
+        "new_insight": _edge_prompt_entry(new_insight),
+        "candidates": [_edge_prompt_entry(item) for item in candidates],
+    }
+    for attempt in range(3):
+        try:
+            response = client.responses.parse(
+                model="gpt-5-nano",
+                instructions=instructions,
+                input=json.dumps(payload),
+                text_format=EdgeClassificationBatch,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                raise RuntimeError("edge classification parse produced no output")
+            return parsed
+        except (APIConnectionError, APITimeoutError):
+            if attempt == 2:
+                raise
+            time.sleep(2**attempt)
+        except RateLimitError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+    raise RuntimeError("classify_edge_batch: exhausted retries")
+
+
+def _edge_prompt_entry(insight: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "insight_id": str(insight.get("insight_id", "")),
+        "title": str(insight.get("title", "")),
+        "question": str(insight.get("question", "")),
+        "claim": str(insight.get("claim", "")),
+        "claim_struct": _json_dict(insight.get("claim_struct_json")),
+        "source_tables": _json_list(insight.get("source_tables_json")),
+    }
 
 
 def _infer_edge_type(

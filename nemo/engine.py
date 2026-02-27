@@ -717,7 +717,7 @@ class NemoEngine:
                 )
             )
             edge_count = 0
-            for edge in link_insight(self.store, full_insight, self.config):
+            for edge in link_insight(self.store, full_insight, self.config, self._llm_client):
                 self.store.insert_edge(
                     from_insight_id=edge["from_insight_id"],
                     to_insight_id=edge["to_insight_id"],
@@ -977,7 +977,7 @@ class NemoEngine:
                     )
                 )
                 edge_count = 0
-                for edge in link_insight(self.store, full_insight, self.config):
+                for edge in link_insight(self.store, full_insight, self.config, self._llm_client):
                     self.store.insert_edge(
                         from_insight_id=edge["from_insight_id"],
                         to_insight_id=edge["to_insight_id"],
