@@ -85,10 +85,10 @@ def build_schema_context(profiles: list[TableProfile]) -> str:
                 extras.append(f"{c.null_pct:.0%} null")
             if c.mean is not None:
                 extras.append(f"mean={c.mean:.1f}")
-            if _is_temporal_dtype(c.dtype) and c.min_val is not None and c.max_val is not None:
+            if c.min_val is not None and c.max_val is not None:
                 extras.append(f"range={c.min_val}..{c.max_val}")
             if c.sample_values:
-                samples = ", ".join(repr(v) for v in c.sample_values[:3])
+                samples = ", ".join(repr(v) for v in c.sample_values[:8])
                 extras.append(f"e.g. {samples}")
             extra_str = f" ({', '.join(extras)})" if extras else ""
             cols.append(f"    {c.name} {c.dtype}{extra_str}")
@@ -142,7 +142,7 @@ STRATEGIST_USER = """\
 
 ## Frontier Suggestions (deterministic)
 {frontier_hints}
-
+{goal_section}
 ## Task
 Decide what to investigate next. Think like a real analyst:
 - If the notebook is empty, start by understanding the most interesting table — look for \
@@ -152,6 +152,11 @@ most important open question? What would a domain expert want to understand deep
 - Connect your reasoning to specific prior findings when they exist.
 - Favor breadth early: touch under-explored tables before continuing a deep thread.
 - Write a single DuckDB SQL query to answer your question.
+
+IMPORTANT: Look carefully at the sample values in the schema above. Use them to write \
+correct SQL — column values may be strings that look numeric (e.g. '$123,456.00'), need \
+casting, or have specific format patterns. Always double-check your WHERE/GROUP BY values \
+against the samples.
 
 Return a JSON object (no markdown fences):
 {{"question": "The specific question to answer", "reasoning": "Why this is the best next step (reference prior findings if any)", "sql": "DuckDB SQL query", "table": "Primary table being queried"}}"""
@@ -173,6 +178,9 @@ You are a senior data analyst interpreting query results from an automated explo
 Your job is to extract meaningful, actionable insights and maintain a running investigation notebook."""
 
 INTERPRETER_USER = """\
+## Available Tables
+{schema}
+
 ## Your Investigation Notebook
 {notebook}
 
@@ -189,18 +197,24 @@ Row count: {row_count}
 ## Task
 1. **Interpret**: What does this result tell us? Does it answer the question? What's surprising \
 or actionable? Be specific with numbers.
-2. **Assess quality**: If the result is trivial (stats on IDs, just restating row counts, or \
+2. **Sanity check**: If the numbers look nonsensical (e.g. negative salaries, impossibly high \
+values, all NULLs), flag a likely data-type or casting issue — check the sample values in the \
+schema above for the correct format. Note any data quality issues in your reasoning.
+3. **Assess quality**: If the result is trivial (stats on IDs, just restating row counts, or \
 tautological), set confidence ≤ 0.3. High confidence (0.7+) requires a non-obvious pattern \
 with clear business meaning.
-3. **Update notebook**: Either extend an existing theme or create a new one. Add the key finding \
+4. **Update notebook**: Either extend an existing theme or create a new one. Add the key finding \
 and any new questions this raises. Mark any questions that were answered.
-4. **Propose hypothesis**: If this finding suggests a specific, testable hypothesis worth validating \
+5. **Propose hypothesis**: If this finding suggests a specific, testable hypothesis worth validating \
 later, include it. Otherwise leave it null.
 
 Return a JSON object (no markdown fences):
 {{"title": "Short finding title (≤10 words)", "claim": "1-2 sentence finding with specific numbers", "confidence": 0.0-1.0, "effect_size": null, "tags": ["tag1", "tag2"], "reasoning": "How this finding connects to prior discoveries and what it means for the investigation (2-3 sentences)", "theme": "Theme name to update or create", "summary_update": "Updated 2-3 sentence summary for this theme", "new_finding": "One-line key finding to add to the theme", "new_open_questions": ["New question raised by this finding"], "resolved_questions": ["Question from notebook that this answered"], "proposed_hypothesis": null, "hypothesis_confidence": null}}"""
 
 INTERPRETER_EMPTY_USER = """\
+## Available Tables
+{schema}
+
 ## Your Investigation Notebook
 {notebook}
 
@@ -213,8 +227,9 @@ SQL: {sql}
 The query returned 0 rows.
 
 ## Task
-Interpret this empty result. Does the absence of data tell us something? Update the notebook \
-accordingly. Set confidence ≤ 0.3 for empty results.
+Interpret this empty result. Does the absence of data tell us something? Check the schema \
+sample values above — the empty result may indicate a casting or filter-value mismatch. \
+Update the notebook accordingly. Set confidence ≤ 0.3 for empty results.
 
 Return the same JSON format as usual."""
 
@@ -222,6 +237,12 @@ Return the same JSON format as usual."""
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
+
+def _format_goal_section(goal: str) -> str:
+    if not goal.strip():
+        return ""
+    return f"\n## Investigation Goal\n{goal}\nKeep this goal in mind — prioritize lines of inquiry that serve it.\n"
+
 
 async def plan_next_step(
     notebook: Notebook,
@@ -234,6 +255,7 @@ async def plan_next_step(
     planning_feedback: str | None = None,
 ) -> Hypothesis:
     """Ask the LLM to propose the next investigation step."""
+    goal_section = _format_goal_section(config.goal)
     if error_context:
         user_content = STRATEGIST_RETRY_USER.format(
             error=error_context["error"],
@@ -245,6 +267,7 @@ async def plan_next_step(
                 notebook=format_notebook(notebook),
                 coverage=coverage_context or "(not provided)",
                 frontier_hints=frontier_hints or "(none)",
+                goal_section=goal_section,
             )},
             {"role": "user", "content": user_content},
         ]
@@ -255,6 +278,7 @@ async def plan_next_step(
                 notebook=format_notebook(notebook),
                 coverage=coverage_context or "(not provided)",
                 frontier_hints=frontier_hints or "(none)",
+                goal_section=goal_section,
             )},
         ]
     if planning_feedback:
@@ -295,6 +319,7 @@ async def interpret_and_update(
     """Ask the LLM to interpret a query result and update the notebook."""
     if result.row_count == 0:
         user_content = INTERPRETER_EMPTY_USER.format(
+            schema=schema_context,
             notebook=format_notebook(notebook),
             question=hypothesis.question,
             reasoning=hypothesis.reasoning,
@@ -303,6 +328,7 @@ async def interpret_and_update(
     else:
         rows_preview = _format_rows(result.rows[:20], result.column_names)
         user_content = INTERPRETER_USER.format(
+            schema=schema_context,
             notebook=format_notebook(notebook),
             question=hypothesis.question,
             reasoning=hypothesis.reasoning,

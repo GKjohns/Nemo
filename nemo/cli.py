@@ -264,6 +264,7 @@ def profile(table_name: str = typer.Argument(..., help="Table name")) -> None:
 def run(
     steps: int | None = typer.Option(None, "--steps", "-s", help="Max exploration steps"),
     minutes: float | None = typer.Option(None, "--minutes", "-m", help="Max runtime in minutes"),
+    goal: str | None = typer.Option(None, "--goal", "-g", help="High-level investigation goal or context"),
     plan: bool = typer.Option(False, "--plan", help="Dry run: generate + score frontier only"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full phase output"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output"),
@@ -273,6 +274,8 @@ def run(
     try:
         store = _open_store()
         config = _load_config()
+        if goal:
+            config.goal = goal
         bus = EventBus()
         bus.subscribe(DisplaySubscriber(verbose=verbose or config.verbose, quiet=quiet or config.quiet))
         bus.subscribe(UserHookSubscriber(config))
@@ -292,6 +295,7 @@ def resume(
     run_id: str | None = typer.Argument(None, help="Run ID to resume (omit to use most recent)"),
     steps: int | None = typer.Option(None, "--steps", "-s"),
     minutes: float | None = typer.Option(None, "--minutes", "-m"),
+    goal: str | None = typer.Option(None, "--goal", "-g", help="High-level investigation goal or context"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     quiet: bool = typer.Option(False, "--quiet", "-q"),
 ) -> None:
@@ -300,6 +304,8 @@ def resume(
     try:
         store = _open_store()
         config = _load_config()
+        if goal:
+            config.goal = goal
         if run_id is None:
             runs = store.list_runs(limit=10)
             if not runs:
@@ -362,9 +368,10 @@ def status() -> None:
 def plan(
     steps: int | None = typer.Option(None, "--steps", "-s"),
     minutes: float | None = typer.Option(None, "--minutes", "-m"),
+    goal: str | None = typer.Option(None, "--goal", "-g", help="High-level investigation goal or context"),
 ) -> None:
     """Alias for `run --plan`."""
-    run(steps=steps, minutes=minutes, plan=True, verbose=False, quiet=False)
+    run(steps=steps, minutes=minutes, goal=goal, plan=True, verbose=False, quiet=False)
 
 
 @app.command()

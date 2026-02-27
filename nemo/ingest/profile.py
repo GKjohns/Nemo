@@ -66,7 +66,7 @@ def profile_table(store: NemoStore, table_name: str) -> TableProfile:
             SELECT DISTINCT {safe_col}
             FROM {safe_table}
             WHERE {safe_col} IS NOT NULL
-            LIMIT 5
+            LIMIT 8
             """
         ).fetchall()
         sample_values = [sample[0] for sample in sample_rows]

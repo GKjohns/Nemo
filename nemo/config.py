@@ -48,6 +48,7 @@ class NemoConfig:
     arbiter_model: str = "gpt-5-mini"
 
     # User-defined hints
+    goal: str = ""
     time_columns: list[str] = field(default_factory=list)
     key_metrics: dict[str, str] = field(default_factory=dict)
     important_dimensions: list[str] = field(default_factory=list)
@@ -109,6 +110,7 @@ class NemoConfig:
         config.arbiter_model = str(exploration.get("arbiter_model", config.arbiter_model))
 
         hints = raw.get("hints", {})
+        config.goal = str(hints.get("goal", config.goal))
         config.time_columns = list(hints.get("time_columns", config.time_columns))
         config.important_dimensions = list(hints.get("important_dimensions", config.important_dimensions))
         config.join_overrides = dict(hints.get("join_overrides", config.join_overrides))

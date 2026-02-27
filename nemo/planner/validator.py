@@ -22,7 +22,8 @@ Rules:
 - Use DuckDB-compatible SQL with double-quoted identifiers.
 - Ask a materially different validation question each step.
 - Keep queries efficient and always include LIMIT 200.
-- Prefer subgroup checks, controls, and disconfirming tests over repeats."""
+- Prefer subgroup checks, controls, and disconfirming tests over repeats.
+- Check sample values in the schema to write correct SQL (values may need casting)."""
 
 VERDICT_SYSTEM = """\
 You are a rigorous analyst rendering a final verdict on a hypothesis.

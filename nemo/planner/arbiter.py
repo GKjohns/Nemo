@@ -20,6 +20,8 @@ that emerged from prior exploration (EXPLOIT).
 Think like a senior analyst managing an investigation with a limited
 time budget. Balance breadth (coverage) with depth (validation).
 If choosing EXPLOIT, pick the highest-priority hypothesis for this moment.
+If the user has provided an investigation goal, weight hypotheses that
+serve that goal more heavily.
 Return a structured decision with clear reasoning."""
 
 
@@ -96,6 +98,7 @@ async def decide_phase(
         recent_phases=recent_phases,
         elapsed_minutes=elapsed_minutes,
         time_budget_minutes=time_budget_minutes,
+        config=config,
     )
     return await _call_arbiter_llm(context, config, client)
 
@@ -110,12 +113,18 @@ def _build_arbiter_context(
     recent_phases: list[PhaseDecision],
     elapsed_minutes: float,
     time_budget_minutes: float,
+    config: NemoConfig | None = None,
 ) -> str:
     touched = sorted({t for entry in notebook.entries for t in entry.tables_touched if t})
     untouched = sorted([t for t in all_tables if t not in set(touched)])
 
     formatted_hypotheses = _format_hypotheses(hypotheses)
     recent = _format_recent_phases(recent_phases)
+
+    goal_section = ""
+    goal = getattr(config, "goal", "")
+    if goal and goal.strip():
+        goal_section = f"\n## Investigation Goal\n{goal}\n"
 
     return f"""\
 ## Investigation State
@@ -134,7 +143,7 @@ Time elapsed: {elapsed_minutes:.1f} / {time_budget_minutes:.1f} minutes
 
 ## Recent Decisions
 {recent}
-
+{goal_section}
 ## Task
 Decide whether the next step should be:
 - EXPLORE: open-ended investigation for new patterns
