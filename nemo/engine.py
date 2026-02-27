@@ -52,6 +52,7 @@ from nemo.planner.strategist import (
     interpret_and_update,
     plan_next_step,
 )
+from nemo.report.brief import generate_run_debrief
 from nemo.store import NemoStore
 from nemo.summarize import summarize_result
 from nemo.summarize.summarize import InsightDraft, make_client
@@ -177,6 +178,7 @@ class NemoEngine:
                 )
 
             learning_count, thread_count = self._safe_post_run_updates(run_id)
+            debrief = await self._generate_debrief(run_id, steps_done, insights_created, errors, started)
             await self._emit_run_terminal_event(
                 run_id=run_id,
                 status=status,
@@ -186,6 +188,7 @@ class NemoEngine:
                 started=started,
                 learnings_recorded=learning_count,
                 thread_cards_updated=thread_count,
+                debrief=debrief,
             )
             self._persist_run_completion(
                 run_id=run_id,
@@ -199,6 +202,7 @@ class NemoEngine:
         except KeyboardInterrupt:
             status = "interrupted"
             learning_count, thread_count = self._safe_post_run_updates(run_id)
+            debrief = await self._generate_debrief(run_id, steps_done, insights_created, errors, started)
             await self._emit_run_terminal_event(
                 run_id=run_id,
                 status=status,
@@ -208,6 +212,7 @@ class NemoEngine:
                 started=started,
                 learnings_recorded=learning_count,
                 thread_cards_updated=thread_count,
+                debrief=debrief,
             )
             self._persist_run_completion(
                 run_id=run_id,
@@ -1171,6 +1176,36 @@ class NemoEngine:
             thread_count = 0
         return learning_count, thread_count
 
+    async def _generate_debrief(
+        self,
+        run_id: str,
+        steps_done: int,
+        insights_created: int,
+        errors: int,
+        started: float,
+    ) -> str:
+        """Generate an end-of-run narrative debrief and persist it."""
+        notebook = self._load_or_create_notebook(run_id)
+        hypotheses = self._load_hypotheses(run_id)
+        stats = self._stats_payload(steps_done, insights_created, errors, started)
+        goal = getattr(self.config, "goal", "") or ""
+        try:
+            debrief = await generate_run_debrief(
+                notebook=notebook,
+                hypotheses=hypotheses,
+                stats=stats,
+                goal=goal,
+                client=self._llm_client,
+            )
+        except Exception:  # noqa: BLE001
+            debrief = ""
+        if debrief:
+            try:
+                self.store.save_debrief(run_id, debrief)
+            except Exception:  # noqa: BLE001
+                pass
+        return debrief
+
     async def _emit_run_terminal_event(
         self,
         *,
@@ -1182,12 +1217,14 @@ class NemoEngine:
         started: float,
         learnings_recorded: int,
         thread_cards_updated: int,
+        debrief: str = "",
     ) -> None:
         stats = self._stats_payload(steps_done, insights_created, errors, started)
         payload = {
             "stats": stats,
             "learnings_recorded": learnings_recorded,
             "thread_cards_updated": thread_cards_updated,
+            "debrief": debrief,
         }
         if status == "interrupted":
             payload["reason"] = "signal"

@@ -475,6 +475,21 @@ class NemoStore:
         ).fetchone()
         return bool(row and row[0] > 0)
 
+    def save_debrief(self, run_id: str, debrief_text: str) -> None:
+        self.execute(
+            "UPDATE runs SET debrief_text = ? WHERE run_id = ?",
+            [debrief_text, run_id],
+        )
+
+    def load_debrief(self, run_id: str) -> str | None:
+        row = self.execute(
+            "SELECT debrief_text FROM runs WHERE run_id = ? LIMIT 1",
+            [run_id],
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+        return None
+
     def _migrate(self) -> None:
         """Additive migrations for existing databases."""
         migrations = [
@@ -497,6 +512,7 @@ class NemoStore:
                 updated_at         TIMESTAMP NOT NULL DEFAULT now()
             )
             """,
+            "ALTER TABLE runs ADD COLUMN debrief_text VARCHAR",
         ]
         for sql in migrations:
             try:

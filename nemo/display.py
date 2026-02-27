@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from nemo.events import EventType, NemoEvent
@@ -120,9 +121,11 @@ class DisplaySubscriber:
             )
         elif event.type == EventType.RUN_COMPLETED:
             self._show_run_summary(event.payload.get("stats", {}))
+            self._show_debrief(event.payload.get("debrief", ""))
         elif event.type == EventType.RUN_INTERRUPTED:
             self.console.print("[yellow]run interrupted[/yellow]")
             self._show_run_summary(event.payload.get("stats", {}))
+            self._show_debrief(event.payload.get("debrief", ""))
         elif event.type == EventType.RUN_ERROR:
             self.console.print(f"[red]run failed[/red] {event.payload.get('error', '')}")
 
@@ -140,6 +143,12 @@ class DisplaySubscriber:
         for key in ["steps", "insights_created", "errors", "duration_ms", "frontier_remaining"]:
             table.add_row(key, str(stats_payload.get(key, 0)))
         self.console.print(table)
+
+    def _show_debrief(self, debrief: str) -> None:
+        if not debrief or not debrief.strip() or self.quiet:
+            return
+        self.console.print()
+        self.console.print(Panel(debrief.strip(), title="Investigation Summary", border_style="cyan", padding=(1, 2)))
 
     def _show_plan_table(self, payload: dict[str, Any]) -> None:
         actions = payload.get("top_actions") or []

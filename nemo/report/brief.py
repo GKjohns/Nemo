@@ -2,12 +2,150 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
+
 from nemo.graph import find_contradiction_clusters
+from nemo.planner.models import HypothesisRecord
+from nemo.planner.strategist import Notebook, format_notebook
 from nemo.store import NemoStore
+
+
+DEBRIEF_SYSTEM = """\
+You are a senior analyst writing the executive debrief for an automated data \
+investigation run. Your audience is a human who wants to understand what was \
+explored, what was found, and what to do next — without reading raw logs.
+
+Write in direct, professional prose. Use specific numbers and table/column names. \
+Do not hedge excessively. If data quality issues were encountered, note them \
+matter-of-factly. If a goal was provided, assess progress toward it."""
+
+
+async def generate_run_debrief(
+    notebook: Notebook,
+    hypotheses: list[HypothesisRecord],
+    stats: dict[str, Any],
+    goal: str,
+    client: OpenAI | None,
+    model: str = "gpt-5.2",
+) -> str:
+    """Produce a narrative debrief from the run's notebook and hypothesis outcomes.
+
+    Falls back to a formatted notebook dump when no LLM client is available.
+    """
+    context = _build_debrief_context(notebook, hypotheses, stats, goal)
+    if client is None:
+        return _fallback_debrief(notebook, hypotheses, stats, goal)
+
+    for attempt in range(3):
+        try:
+            response = await asyncio.to_thread(
+                client.responses.create,
+                model=model,
+                instructions=DEBRIEF_SYSTEM,
+                input=[{"role": "user", "content": context}],
+                reasoning={"effort": "medium"},
+            )
+            text = response.output_text
+            if text and text.strip():
+                return text.strip()
+            return _fallback_debrief(notebook, hypotheses, stats, goal)
+        except (APIConnectionError, APITimeoutError):
+            if attempt == 2:
+                return _fallback_debrief(notebook, hypotheses, stats, goal)
+            await asyncio.sleep(2 ** attempt)
+        except RateLimitError:
+            if attempt == 2:
+                return _fallback_debrief(notebook, hypotheses, stats, goal)
+            await asyncio.sleep(5 * (attempt + 1))
+        except Exception:  # noqa: BLE001
+            return _fallback_debrief(notebook, hypotheses, stats, goal)
+    return _fallback_debrief(notebook, hypotheses, stats, goal)
+
+
+def _build_debrief_context(
+    notebook: Notebook,
+    hypotheses: list[HypothesisRecord],
+    stats: dict[str, Any],
+    goal: str,
+) -> str:
+    parts: list[str] = []
+
+    parts.append("## Investigation Notebook")
+    parts.append(format_notebook(notebook))
+
+    parts.append("\n## Hypothesis Outcomes")
+    if not hypotheses:
+        parts.append("(no hypotheses were proposed)")
+    else:
+        for h in hypotheses:
+            evidence_count = len(h.evidence_chain)
+            verdict_line = f" Verdict: {h.verdict}" if h.verdict else ""
+            parts.append(
+                f"- {h.hypothesis_id} [{h.status}] confidence={h.verdict_confidence or h.initial_confidence:.2f}, "
+                f"evidence={evidence_count}: {h.claim}{verdict_line}"
+            )
+
+    parts.append("\n## Run Statistics")
+    parts.append(f"Steps: {stats.get('steps', 0)}")
+    parts.append(f"Insights created: {stats.get('insights_created', 0)}")
+    parts.append(f"Errors: {stats.get('errors', 0)}")
+    duration_ms = stats.get("duration_ms", 0)
+    parts.append(f"Duration: {duration_ms / 1000:.0f}s ({duration_ms / 60000:.1f}m)")
+
+    if goal.strip():
+        parts.append(f"\n## Investigation Goal\n{goal}")
+
+    parts.append(
+        "\n## Task\n"
+        "Write a concise investigation debrief (3-5 paragraphs). Cover:\n"
+        "1. What was explored and the main findings (with specific numbers)\n"
+        "2. Key hypotheses tested and their outcomes\n"
+        "3. Data quality issues or methodology notes\n"
+        "4. What remains open / recommended next steps\n"
+        "5. Progress toward the investigation goal (if one was set)\n\n"
+        "Write for a human reader. Be direct and specific."
+    )
+
+    return "\n".join(parts)
+
+
+def _fallback_debrief(
+    notebook: Notebook,
+    hypotheses: list[HypothesisRecord],
+    stats: dict[str, Any],
+    goal: str,
+) -> str:
+    """Deterministic fallback when LLM is unavailable."""
+    lines: list[str] = []
+    lines.append(
+        f"Completed {stats.get('steps', 0)} steps, "
+        f"producing {stats.get('insights_created', 0)} insights "
+        f"with {stats.get('errors', 0)} errors."
+    )
+    if goal.strip():
+        lines.append(f"\nGoal: {goal}")
+
+    if notebook.entries:
+        lines.append("\nThemes explored:")
+        for entry in notebook.entries:
+            lines.append(f"  [{entry.theme}] {entry.summary}")
+            for finding in entry.key_findings[-3:]:
+                lines.append(f"    - {finding}")
+            if entry.open_questions:
+                lines.append(f"    Open: {entry.open_questions[0]}")
+
+    if hypotheses:
+        lines.append("\nHypothesis outcomes:")
+        for h in hypotheses:
+            verdict_part = f" — {h.verdict}" if h.verdict else ""
+            lines.append(f"  [{h.status}] {h.claim}{verdict_part}")
+
+    return "\n".join(lines)
 
 
 def generate_brief_markdown(store: NemoStore, top_n: int = 10) -> str:

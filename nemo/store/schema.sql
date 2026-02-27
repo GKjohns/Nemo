@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS runs (
     insights_created  INTEGER NOT NULL DEFAULT 0,
     errors            INTEGER NOT NULL DEFAULT 0,
     frontier_size     INTEGER NOT NULL DEFAULT 0,
-    notes             VARCHAR
+    notes             VARCHAR,
+    debrief_text      VARCHAR
 );
 
 -- 6) thread_cards
