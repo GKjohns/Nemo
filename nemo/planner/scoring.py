@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
+from typing import Any
+
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
 from nemo.graph import recall_learnings
-from nemo.planner.models import FrontierItem
+from nemo.planner.models import FrontierItem, RerankedFrontier
+from nemo.planner.strategist import Notebook, format_notebook
+
+
+FRONTIER_RERANK_TOP_N = 8
 
 
 def score_item(
@@ -49,6 +57,29 @@ def score_frontier(items: list[FrontierItem], ctx) -> list[FrontierItem]:
 
     scored = [item.model_copy(update={"score": score_item(item, ctx, learnings=learnings)}) for item in items]
     return sorted(scored, key=lambda item: (-item.score, item.created_at, item.dedupe_key))
+
+
+def rerank_frontier(
+    items: list[FrontierItem],
+    notebook: Notebook,
+    config,
+    client: OpenAI | None,
+    *,
+    top_n: int = FRONTIER_RERANK_TOP_N,
+) -> tuple[list[FrontierItem], list[FrontierItem]]:
+    """Re-rank deterministically-scored frontier items with LLM editorial judgment."""
+    deterministic = list(items)
+    limit = max(1, int(top_n))
+    if client is None or len(deterministic) <= 1:
+        return deterministic, deterministic[:limit]
+
+    head = deterministic[:limit]
+    tail = deterministic[limit:]
+    try:
+        reranked_head = _rerank_top_candidates(head, notebook, config, client)
+    except Exception:  # noqa: BLE001
+        reranked_head = head
+    return reranked_head + tail, head
 
 
 def _info_gain_proxy(table: str, recent_insights: list[dict]) -> float:
@@ -158,3 +189,94 @@ def derive_recent_insight_keys(recent_insights: list[dict]) -> set[str]:
                 if isinstance(dedupe, str) and dedupe:
                     keys.add(dedupe)
     return keys
+
+
+def _rerank_top_candidates(
+    top_candidates: list[FrontierItem],
+    notebook: Notebook,
+    config,
+    client: OpenAI,
+) -> list[FrontierItem]:
+    payload = {
+        "notebook": format_notebook(notebook),
+        "candidates": [
+            {
+                "action_index": idx,
+                "action_type": item.action_type,
+                "table": str(item.payload.get("table") or ""),
+                "target": _target_for_payload(item.payload),
+                "deterministic_score": float(item.score),
+                "rationale": item.rationale,
+                "dedupe_key": item.dedupe_key,
+            }
+            for idx, item in enumerate(top_candidates)
+        ],
+    }
+    instructions = (
+        "You are a senior analytics lead. Re-rank frontier candidates from most to least valuable next step. "
+        "Prioritize candidate investigations likely to produce surprising or actionable findings, and use notebook "
+        "context to avoid redundant work. Return rankings that reference action_index values from the input."
+    )
+    parsed = _call_reranker_llm(payload, instructions, config, client)
+    return _apply_rankings(top_candidates, parsed)
+
+
+def _call_reranker_llm(
+    payload: dict[str, Any],
+    instructions: str,
+    config,
+    client: OpenAI,
+) -> RerankedFrontier:
+    model_name = str(getattr(config, "frontier_rerank_model", "gpt-5-nano") or "gpt-5-nano")
+    for attempt in range(3):
+        try:
+            response = client.responses.parse(
+                model=model_name,
+                instructions=instructions,
+                input=json.dumps(payload),
+                text_format=RerankedFrontier,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                raise RuntimeError("frontier rerank parse produced no output")
+            return parsed
+        except (APIConnectionError, APITimeoutError):
+            if attempt == 2:
+                raise
+            time.sleep(2**attempt)
+        except RateLimitError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+    raise RuntimeError("rerank_frontier: exhausted retries")
+
+
+def _apply_rankings(
+    candidates: list[FrontierItem],
+    reranked: RerankedFrontier,
+) -> list[FrontierItem]:
+    by_index = {idx: item for idx, item in enumerate(candidates)}
+    selected: list[FrontierItem] = []
+    seen: set[int] = set()
+    ordered = sorted(reranked.rankings, key=lambda row: int(row.rank))
+    for row in ordered:
+        idx = int(row.action_index)
+        item = by_index.get(idx)
+        if item is None or idx in seen:
+            continue
+        seen.add(idx)
+        reason = row.reasoning.strip()
+        if reason:
+            item = item.model_copy(update={"rationale": reason})
+        selected.append(item)
+    for idx, item in by_index.items():
+        if idx not in seen:
+            selected.append(item)
+    return selected
+
+
+def _target_for_payload(payload: dict[str, Any]) -> str:
+    target = str(payload.get("metric_col") or payload.get("dimension_col") or payload.get("target_col") or "")
+    if target:
+        return target
+    return str(payload.get("question") or payload.get("table") or "-")

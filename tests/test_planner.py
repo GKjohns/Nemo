@@ -13,12 +13,13 @@ from nemo.planner import (
     derive_recent_insight_keys,
     get_all_generators,
     is_saturated,
+    rerank_frontier,
     run_generators,
     score_frontier,
     select_next,
 )
 from nemo.planner.arbiter import decide_phase, should_consult_arbiter
-from nemo.planner.models import EvidenceLink, HypothesisRecord, PhaseDecision
+from nemo.planner.models import EvidenceLink, HypothesisRecord, PhaseDecision, RankedCandidate, RerankedFrontier
 from nemo.planner.strategist import (
     Hypothesis,
     InterpretationResult,
@@ -77,6 +78,80 @@ def test_dedupe_and_scoring_are_deterministic(store):
     second = score_frontier(deduped, ctx)
     assert [item.score for item in first] == [item.score for item in second]
     assert all(first[idx].score >= first[idx + 1].score for idx in range(len(first) - 1))
+
+
+def test_rerank_frontier_applies_llm_order_and_reasoning(store):
+    ctx = _make_context(store)
+    scored = score_frontier(run_generators(ctx), ctx)[:8]
+
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def parse(self, **kwargs):
+            self.kwargs = kwargs
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": RerankedFrontier(
+                        rankings=[
+                            RankedCandidate(rank=1, action_index=2, reasoning="Best next high-impact cut."),
+                            RankedCandidate(rank=2, action_index=0, reasoning="Strong baseline follow-up."),
+                            RankedCandidate(rank=3, action_index=1, reasoning="Good supporting investigation."),
+                        ]
+                    ),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    notebook = Notebook(
+        entries=[
+            NotebookEntry(
+                theme="Revenue",
+                summary="Revenue trend has early signal.",
+                key_findings=["Q1 shows stronger variance by segment."],
+                open_questions=["Which dimension best explains the variance?"],
+                tables_touched=["orders"],
+                step_count=2,
+            )
+        ],
+        total_steps=2,
+    )
+    fake_client = _FakeClient()
+    reranked, deterministic = rerank_frontier(scored, notebook, NemoConfig(), fake_client, top_n=8)  # type: ignore[arg-type]
+    assert deterministic[0].action_id == scored[0].action_id
+    assert reranked[0].action_id == scored[2].action_id
+    assert "Best next high-impact cut." in reranked[0].rationale
+    assert fake_client.responses.kwargs is not None
+    assert fake_client.responses.kwargs["text_format"] is RerankedFrontier
+
+
+def test_rerank_frontier_falls_back_to_deterministic_on_llm_error(store):
+    ctx = _make_context(store)
+    scored = score_frontier(run_generators(ctx), ctx)[:8]
+
+    class _BrokenResponses:
+        def parse(self, **kwargs):
+            raise RuntimeError("synthetic llm failure")
+
+    class _BrokenClient:
+        def __init__(self) -> None:
+            self.responses = _BrokenResponses()
+
+    reranked, deterministic = rerank_frontier(
+        scored,
+        Notebook(),
+        NemoConfig(),
+        _BrokenClient(),  # type: ignore[arg-type]
+        top_n=8,
+    )
+    assert [item.action_id for item in reranked] == [item.action_id for item in scored]
+    assert [item.action_id for item in deterministic] == [item.action_id for item in scored]
 
 
 def test_scheduler_respects_budget_and_saturation(store):

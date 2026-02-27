@@ -93,6 +93,20 @@ class EdgeClassification(BaseModel):
     rationale: str = ""
 
 
+class RankedCandidate(BaseModel):
+    """One ranked candidate entry from frontier re-ranking."""
+
+    rank: int
+    action_index: int
+    reasoning: str = ""
+
+
+class RerankedFrontier(BaseModel):
+    """Structured LLM output for frontier candidate re-ranking."""
+
+    rankings: list[RankedCandidate] = Field(default_factory=list)
+
+
 class HypothesisRecord(BaseModel):
     """Backlog record for a testable claim discovered during exploration."""
 

@@ -6,7 +6,7 @@ from nemo.planner.loader import get_all_generators, load_custom_generators
 from nemo.planner.arbiter import decide_phase, should_consult_arbiter
 from nemo.planner.models import FrontierItem
 from nemo.planner.scheduler import is_saturated, select_next
-from nemo.planner.scoring import derive_recent_insight_keys, score_frontier, score_item
+from nemo.planner.scoring import derive_recent_insight_keys, rerank_frontier, score_frontier, score_item
 from nemo.planner.validator import (
     classify_validation_evidence,
     plan_validation_step,
@@ -26,6 +26,7 @@ __all__ = [
     "classify_validation_evidence",
     "load_custom_generators",
     "plan_validation_step",
+    "rerank_frontier",
     "render_verdict",
     "run_generators",
     "score_frontier",

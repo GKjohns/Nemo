@@ -39,6 +39,13 @@ class DisplaySubscriber:
                     f"deduped={event.payload.get('after_dedupe', 0)} "
                     f"top_score={event.payload.get('top_score', 0):.3f}"
                 )
+                deterministic = event.payload.get("top_actions_deterministic") or []
+                reranked = event.payload.get("top_actions") or []
+                if deterministic and reranked:
+                    det_types = " > ".join(str(action.get("type", "")) for action in deterministic[:8])
+                    reranked_types = " > ".join(str(action.get("type", "")) for action in reranked[:8])
+                    self.console.print(f"  deterministic_top8: {det_types}")
+                    self.console.print(f"  reranked_top8:      {reranked_types}")
         elif event.type == EventType.FRONTIER_SATURATED:
             self.console.print(
                 f"[yellow]saturated[/yellow] top_score={event.payload.get('top_score', 0):.3f} "

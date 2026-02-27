@@ -26,6 +26,7 @@ from nemo.planner import (
     get_all_generators,
     is_saturated,
     plan_validation_step,
+    rerank_frontier,
     render_verdict,
     score_frontier,
     select_next,
@@ -304,7 +305,7 @@ class NemoEngine:
 
         if plan_only:
             coverage_context = _build_coverage_context(notebook, all_tables, self.config.max_steps_per_theme)
-            frontier_hints = self._build_strategist_frontier_hints(profiles, joins)
+            frontier_hints = self._build_strategist_frontier_hints(notebook, profiles, joins)
             hypothesis = await plan_next_step(
                 notebook,
                 schema_ctx,
@@ -378,7 +379,7 @@ class NemoEngine:
 
             # --- PLAN: ask the LLM what to investigate next ---
             coverage_context = _build_coverage_context(notebook, all_tables, self.config.max_steps_per_theme)
-            frontier_hints = self._build_strategist_frontier_hints(profiles, joins)
+            frontier_hints = self._build_strategist_frontier_hints(notebook, profiles, joins)
             validation_target: HypothesisRecord | None = None
             if current_decision.phase == "explore":
                 planning_feedback_parts: list[str] = []
@@ -796,8 +797,8 @@ class NemoEngine:
 
         return steps_done, insights_created, errors, status
 
-    def _build_strategist_frontier_hints(self, profiles: list, joins: list) -> str:
-        """Build deterministic frontier suggestions to guide strategist breadth."""
+    def _build_strategist_frontier_hints(self, notebook: Notebook, profiles: list, joins: list) -> str:
+        """Build frontier suggestions to guide strategist breadth."""
         recent_insights = self.store.get_recent_insights(limit=50)
         ctx = GeneratorContext(
             store=self.store,
@@ -819,7 +820,9 @@ class NemoEngine:
         )
         if not deduped:
             return "(no deterministic suggestions)"
-        ranked = score_frontier(deduped, ctx)[:8]
+        scored = score_frontier(deduped, ctx)
+        ranked, _ = rerank_frontier(scored, notebook, self.config, self._llm_client, top_n=8)
+        ranked = ranked[:8]
         lines: list[str] = []
         for item in ranked:
             table = str(item.payload.get("table") or "-")
@@ -1068,7 +1071,15 @@ class NemoEngine:
             recent_insight_keys=derive_recent_insight_keys(memory["recent_insights"]),
         )
         scored = score_frontier(deduped, ctx)
-        for item in scored:
+        notebook = self._load_or_create_notebook(run_id)
+        reranked, deterministic_top = rerank_frontier(
+            scored,
+            notebook,
+            self.config,
+            self._llm_client,
+            top_n=8,
+        )
+        for item in reranked:
             self.store.insert_frontier_item(
                 action_type=item.action_type, payload_json=item.payload,
                 dedupe_key=item.dedupe_key, run_id=run_id,
@@ -1076,9 +1087,18 @@ class NemoEngine:
                 status="queued", last_error=item.last_error,
                 depends_on_action_id=item.depends_on_action_id,
             )
-        top_score = scored[0].score if scored else 0.0
+        top_score = reranked[0].score if reranked else 0.0
+        top_actions_deterministic = []
+        for ranked, item in enumerate(deterministic_top[:8], start=1):
+            top_actions_deterministic.append({
+                "rank": ranked,
+                "score": float(item.score),
+                "type": item.action_type,
+                "table": str(item.payload.get("table") or ""),
+                "target": _target_for_payload(item.payload),
+            })
         top_actions = []
-        for ranked, item in enumerate(scored[:15], start=1):
+        for ranked, item in enumerate(reranked[:15], start=1):
             top_actions.append({
                 "rank": ranked, "score": float(item.score),
                 "type": item.action_type,
@@ -1088,8 +1108,9 @@ class NemoEngine:
             })
         return {
             "generated": len(generated), "after_dedupe": len(deduped),
-            "after_score": len(scored), "top_score": top_score,
+            "after_score": len(reranked), "top_score": top_score,
             "plan_only": plan_only, "top_actions": top_actions,
+            "top_actions_deterministic": top_actions_deterministic,
         }
 
     def _stats_payload(self, steps_done: int, insights_created: int, errors: int, started: float) -> dict[str, Any]:
