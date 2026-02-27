@@ -259,6 +259,13 @@ def _show_graph(store) -> None:
     table.add_row("Depends on", str(stats["depends_on"]))
     table.add_row("Avg confidence", f"{stats['avg_confidence']:.3f}")
     table.add_row("Coverage", f"{stats['coverage_touched']}/{stats['coverage_total']} ({stats['coverage_ratio']:.0%})")
+    table.add_row("Hypotheses", str(stats.get("hypotheses_total", 0)))
+    hypothesis_counts = stats.get("hypothesis_counts", {})
+    if hypothesis_counts:
+        table.add_row(
+            "Hypothesis status",
+            ", ".join(f"{status}:{count}" for status, count in sorted(hypothesis_counts.items())),
+        )
     console.print(table)
 
     if clusters:
@@ -401,6 +408,7 @@ class _LiveEventSubscriber:
         self._current_hypothesis: dict[str, Any] = {}
         self._current_phase = ""
         self._current_sql = ""
+        self._current_strategy_phase = "explore"
         self._step_start: float = 0.0
         self._status: Any | None = None
 
@@ -455,6 +463,47 @@ class _LiveEventSubscriber:
             self._update_spinner(
                 f"[cyan]{step_label} — Investigating...[/cyan]"
             )
+
+        elif event.type == EventType.PHASE_DECIDED:
+            phase = str(event.payload.get("phase", "explore")).upper()
+            self._current_strategy_phase = phase.lower()
+            hyp_id = str(event.payload.get("hypothesis_id") or "")
+            reason = str(event.payload.get("reasoning") or "")
+            target = f" target={hyp_id}" if hyp_id else ""
+            console.print(f"  [bold magenta]phase[/bold magenta] → {phase}{target}")
+            if reason:
+                wrapped = _wrap_reasoning(reason, indent=4, width=88)
+                console.print(f"    [dim]{wrapped}[/dim]")
+
+        elif event.type == EventType.HYPOTHESIS_PROPOSED:
+            claim = str(event.payload.get("claim") or "")
+            hyp_id = str(event.payload.get("hypothesis_id") or "")
+            conf = float(event.payload.get("initial_confidence") or 0.0)
+            console.print(
+                f"    [blue]hypothesis proposed[/blue] {hyp_id} · {_conf_badge(conf)}"
+            )
+            if claim:
+                console.print(f"      {claim[:120]}")
+
+        elif event.type == EventType.VALIDATION_STEP:
+            hyp_id = str(event.payload.get("hypothesis_id") or "")
+            step_no = int(event.payload.get("validation_step") or 0)
+            step_max = int(event.payload.get("max_validation_steps") or 0)
+            relation = str(event.payload.get("relationship") or "")
+            console.print(
+                f"    [cyan]validation[/cyan] {hyp_id} step {step_no}/{step_max} · evidence={relation}"
+            )
+
+        elif event.type == EventType.HYPOTHESIS_VERDICT:
+            hyp_id = str(event.payload.get("hypothesis_id") or "")
+            status = str(event.payload.get("status") or "inconclusive")
+            conf = float(event.payload.get("verdict_confidence") or 0.0)
+            verdict = str(event.payload.get("verdict") or "")
+            console.print(
+                f"    [bold]{status}[/bold] {hyp_id} · {_conf_badge(conf)}"
+            )
+            if verdict:
+                console.print(f"      {verdict[:140]}")
 
         elif event.type == EventType.STEP_STARTED:
             self._step_start = time.perf_counter()

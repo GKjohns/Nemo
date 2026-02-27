@@ -194,6 +194,15 @@ def graph_stats(store: NemoStore) -> dict[str, Any]:
     for row in store.execute("SELECT source_tables_json FROM insights WHERE source_tables_json IS NOT NULL").fetchall():
         touched.update(_json_list(row[0]))
     coverage_ratio = (len(touched) / len(datasets)) if datasets else 0.0
+    hypothesis_rows = store.execute(
+        """
+        SELECT status, COUNT(*) AS cnt
+        FROM hypotheses
+        GROUP BY status
+        ORDER BY status
+        """
+    ).fetchall()
+    hypothesis_counts = {str(row[0]): int(row[1]) for row in hypothesis_rows}
 
     return {
         "insights": insights,
@@ -206,6 +215,8 @@ def graph_stats(store: NemoStore) -> dict[str, Any]:
         "coverage_touched": len(touched),
         "coverage_total": len(datasets),
         "coverage_ratio": coverage_ratio,
+        "hypotheses_total": sum(hypothesis_counts.values()),
+        "hypothesis_counts": hypothesis_counts,
     }
 
 

@@ -78,10 +78,26 @@ def test_graph_helpers_and_brief_write(store, tmp_path: Path):
         source_tables_json=["orders"],
     )
     store.insert_edge(from_insight_id=left, to_insight_id=right, edge_type="contradicts", weight=0.9)
+    store.save_hypothesis(
+        "run_test",
+        {
+            "hypothesis_id": "hyp_1",
+            "claim": "A contradicts B under segment cut.",
+            "source_insight_id": left,
+            "initial_confidence": 0.61,
+            "status": "testing",
+            "priority": 0.5,
+            "evidence_chain": [],
+            "validation_step": 1,
+            "tables_involved": ["orders"],
+        },
+    )
 
     stats = data.graph_stats(store)
     assert stats["insights"] == 2
     assert stats["contradictions"] == 1
+    assert stats["hypotheses_total"] == 1
+    assert stats["hypothesis_counts"]["testing"] == 1
 
     edges = data.list_edges(store, edge_type="contradicts")
     assert len(edges) == 1

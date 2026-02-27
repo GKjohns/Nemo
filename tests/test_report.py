@@ -31,9 +31,26 @@ def test_generate_brief_contains_required_sections(store):
         source_tables_json=["orders"],
     )
     store.insert_edge(from_insight_id=left, to_insight_id=right, edge_type="contradicts")
+    store.save_hypothesis(
+        run_id,
+        {
+            "hypothesis_id": "hyp_1",
+            "claim": "European revenue trend has reversed in recent months.",
+            "source_insight_id": left,
+            "initial_confidence": 0.72,
+            "status": "validated",
+            "priority": 0.8,
+            "evidence_chain": [{"insight_id": left, "relationship": "supports", "note": "strong trend"}],
+            "verdict": "Validated after segmentation and confound checks.",
+            "verdict_confidence": 0.84,
+            "validation_step": 3,
+            "tables_involved": ["orders"],
+        },
+    )
 
     markdown = generate_brief_markdown(store, top_n=5)
     assert "## Top Insights" in markdown
+    assert "## Hypothesis Verdicts" in markdown
     assert "## Contradictions" in markdown
     assert "## Coverage" in markdown
     assert "## Recommendations" in markdown

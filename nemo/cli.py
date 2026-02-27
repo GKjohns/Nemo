@@ -424,7 +424,17 @@ def stats() -> None:
         contradictions = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'contradicts'").fetchone()[0])
         supports = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'supports'").fetchone()[0])
         refines = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'refines'").fetchone()[0])
+        depends_on = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'depends_on'").fetchone()[0])
         avg_conf = float(store.execute("SELECT AVG(confidence) FROM insights WHERE status = 'ok'").fetchone()[0] or 0.0)
+        hypothesis_rows = store.execute(
+            """
+            SELECT status, COUNT(*) AS cnt
+            FROM hypotheses
+            GROUP BY status
+            ORDER BY status
+            """
+        ).fetchall()
+        hypothesis_counts = {str(row[0]): int(row[1]) for row in hypothesis_rows}
 
         datasets = [str(row[0]) for row in store.execute("SELECT name FROM datasets").fetchall()]
         touched: set[str] = set()
@@ -440,8 +450,12 @@ def stats() -> None:
         table.add_row("supports edges", str(supports))
         table.add_row("contradicts edges", str(contradictions))
         table.add_row("refines edges", str(refines))
+        table.add_row("depends_on edges", str(depends_on))
         table.add_row("avg confidence", f"{avg_conf:.3f}")
         table.add_row("table coverage", f"{len(touched)}/{len(datasets)} ({coverage_ratio:.1%})")
+        table.add_row("hypotheses", str(sum(hypothesis_counts.values())))
+        for status, count in sorted(hypothesis_counts.items()):
+            table.add_row(f"hypothesis:{status}", str(count))
         console.print(table)
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]graph stats failed:[/red] {exc}")

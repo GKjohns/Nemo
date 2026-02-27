@@ -90,6 +90,34 @@ class DisplaySubscriber:
             cluster = event.payload.get("cluster", {})
             ids = cluster.get("insight_ids", [])
             self.console.print(f"[magenta]contradiction[/magenta] cluster_size={len(ids)}")
+        elif event.type == EventType.PHASE_DECIDED and not self.quiet:
+            phase = str(event.payload.get("phase", "")).upper()
+            hypothesis_id = str(event.payload.get("hypothesis_id") or "")
+            details = f" target={hypothesis_id}" if hypothesis_id else ""
+            self.console.print(f"[blue]phase[/blue] {phase}{details}")
+            if self.verbose:
+                reasoning = str(event.payload.get("reasoning") or "")
+                if reasoning:
+                    self.console.print(f"  reason: {reasoning}")
+        elif event.type == EventType.HYPOTHESIS_PROPOSED and not self.quiet:
+            hypothesis_id = str(event.payload.get("hypothesis_id") or "")
+            claim = str(event.payload.get("claim") or "")
+            self.console.print(f"[cyan]hypothesis proposed[/cyan] {hypothesis_id} {claim[:100]}")
+        elif event.type == EventType.VALIDATION_STEP and not self.quiet:
+            hypothesis_id = str(event.payload.get("hypothesis_id") or "")
+            step_num = int(event.payload.get("validation_step") or 0)
+            max_steps = int(event.payload.get("max_validation_steps") or 0)
+            relationship = str(event.payload.get("relationship") or "")
+            self.console.print(
+                f"[cyan]validation[/cyan] {hypothesis_id} step={step_num}/{max_steps} relation={relationship}"
+            )
+        elif event.type == EventType.HYPOTHESIS_VERDICT and not self.quiet:
+            hypothesis_id = str(event.payload.get("hypothesis_id") or "")
+            status = str(event.payload.get("status") or "")
+            confidence = float(event.payload.get("verdict_confidence") or 0.0)
+            self.console.print(
+                f"[bold]{status}[/bold] {hypothesis_id} confidence={confidence:.2f}"
+            )
         elif event.type == EventType.RUN_COMPLETED:
             self._show_run_summary(event.payload.get("stats", {}))
         elif event.type == EventType.RUN_INTERRUPTED:

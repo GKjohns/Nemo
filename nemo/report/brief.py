@@ -41,6 +41,7 @@ def generate_brief_markdown(store: NemoStore, top_n: int = 10) -> str:
     ).fetchone()
     coverage = _coverage_summary(store)
     recommendations = _recommendations(insights, clusters, coverage)
+    hypothesis_summary = _hypothesis_summary(store, latest_run[0] if latest_run is not None else None)
 
     lines: list[str] = []
     lines.append("# Nemo Brief")
@@ -94,6 +95,27 @@ def generate_brief_markdown(store: NemoStore, top_n: int = 10) -> str:
         lines.append(f"- Average confidence: {float(graph_counts[2] or 0.0):.2f}")
     lines.append("")
 
+    lines.append("## Hypothesis Verdicts")
+    if not hypothesis_summary["rows"]:
+        lines.append("- No hypotheses recorded for the latest run.")
+    else:
+        lines.append(
+            "- Status counts: "
+            + ", ".join(
+                f"{status}={count}" for status, count in sorted(hypothesis_summary["status_counts"].items())
+            )
+        )
+        for row in hypothesis_summary["rows"]:
+            lines.append(
+                f"- `{row['hypothesis_id']}` **{row['status']}** "
+                f"(confidence {row['confidence']:.2f}) — {row['claim']}"
+            )
+            if row["evidence_count"] > 0:
+                lines.append(f"  - Evidence items: {row['evidence_count']}")
+            if row["verdict"]:
+                lines.append(f"  - Verdict: {row['verdict']}")
+    lines.append("")
+
     lines.append("## Recommendations")
     for recommendation in recommendations:
         lines.append(f"- {recommendation}")
@@ -135,6 +157,35 @@ def _recommendations(insights: list[tuple[Any, ...]], clusters: list[dict[str, A
     if not suggestions:
         suggestions.append("Current signal quality looks healthy; continue exploring adjacent dimensions.")
     return suggestions
+
+
+def _hypothesis_summary(store: NemoStore, run_id: str | None) -> dict[str, Any]:
+    if not run_id:
+        return {"rows": [], "status_counts": {}}
+    rows = store.load_hypotheses(run_id)
+    status_counts: dict[str, int] = {}
+    parsed_rows: list[dict[str, Any]] = []
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        evidence = _json_list(row.get("evidence_chain"))
+        parsed_rows.append(
+            {
+                "hypothesis_id": str(row.get("hypothesis_id") or ""),
+                "status": status,
+                "claim": str(row.get("claim") or ""),
+                "confidence": float(
+                    row.get("verdict_confidence")
+                    if row.get("verdict_confidence") is not None
+                    else row.get("initial_confidence")
+                    or 0.0
+                ),
+                "verdict": str(row.get("verdict") or ""),
+                "evidence_count": len(evidence),
+            }
+        )
+    parsed_rows.sort(key=lambda item: (item["status"], -item["confidence"], item["hypothesis_id"]))
+    return {"rows": parsed_rows, "status_counts": status_counts}
 
 
 def _json_list(raw: Any) -> list[str]:
