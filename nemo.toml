@@ -19,6 +19,12 @@ reflect_every = 10
 max_actions_per_thread = 5
 join_confidence_threshold = 0.7
 use_learnings = true
+max_steps_per_theme = 4
+question_similarity_threshold = 0.82
+stagnation_step_limit = 3
+arbiter_interval = 3
+max_validation_steps = 5
+arbiter_model = "gpt-5-mini"
 
 [hints]
 time_columns = []

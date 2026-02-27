@@ -31,6 +31,7 @@ class NemoStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = duckdb.connect(str(self.db_path))
+        self._migrate()
 
     def initialize(self) -> None:
         """Apply the bundled schema.sql file and run any needed migrations."""

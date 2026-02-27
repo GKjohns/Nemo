@@ -95,4 +95,4 @@ nemo.duckdb
 nemo.duckdb*
 
 # Local large dataset snapshot
-docs/nyc_city_payroll_20260227.csv
+dummy_datasets/nyc_city_payroll_20260227.csv

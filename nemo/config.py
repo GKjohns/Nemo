@@ -43,6 +43,9 @@ class NemoConfig:
     max_steps_per_theme: int = 4
     question_similarity_threshold: float = 0.82
     stagnation_step_limit: int = 3
+    arbiter_interval: int = 3
+    max_validation_steps: int = 5
+    arbiter_model: str = "gpt-5-mini"
 
     # User-defined hints
     time_columns: list[str] = field(default_factory=list)
@@ -101,6 +104,9 @@ class NemoConfig:
             exploration.get("question_similarity_threshold", config.question_similarity_threshold)
         )
         config.stagnation_step_limit = int(exploration.get("stagnation_step_limit", config.stagnation_step_limit))
+        config.arbiter_interval = int(exploration.get("arbiter_interval", config.arbiter_interval))
+        config.max_validation_steps = int(exploration.get("max_validation_steps", config.max_validation_steps))
+        config.arbiter_model = str(exploration.get("arbiter_model", config.arbiter_model))
 
         hints = raw.get("hints", {})
         config.time_columns = list(hints.get("time_columns", config.time_columns))
@@ -160,6 +166,9 @@ def write_default_config(path: Path) -> None:
             "max_steps_per_theme": defaults.max_steps_per_theme,
             "question_similarity_threshold": defaults.question_similarity_threshold,
             "stagnation_step_limit": defaults.stagnation_step_limit,
+            "arbiter_interval": defaults.arbiter_interval,
+            "max_validation_steps": defaults.max_validation_steps,
+            "arbiter_model": defaults.arbiter_model,
         },
         "hints": {
             "time_columns": [],

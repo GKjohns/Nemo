@@ -17,6 +17,8 @@ from nemo.planner import (
     score_frontier,
     select_next,
 )
+from nemo.planner.arbiter import decide_phase, should_consult_arbiter
+from nemo.planner.models import EvidenceLink, HypothesisRecord, PhaseDecision
 from nemo.planner.strategist import (
     Hypothesis,
     InterpretationResult,
@@ -26,6 +28,12 @@ from nemo.planner.strategist import (
     build_schema_context,
     format_notebook,
     interpret_and_update,
+)
+from nemo.planner.validator import (
+    classify_validation_evidence,
+    plan_validation_step,
+    render_verdict,
+    should_render_verdict,
 )
 
 
@@ -326,6 +334,258 @@ def test_duplicate_detection_helpers():
         "Monthly revenue variation is primarily driven by volume while prices stay stable.",
         recent_claims,
     )
+
+
+def test_should_consult_arbiter_cadence_and_events():
+    assert should_consult_arbiter(step_num=1, last_arbiter_step=0, arbiter_interval=3, significant_event=False)
+    assert not should_consult_arbiter(step_num=2, last_arbiter_step=1, arbiter_interval=3, significant_event=False)
+    assert should_consult_arbiter(step_num=4, last_arbiter_step=1, arbiter_interval=3, significant_event=False)
+    assert should_consult_arbiter(step_num=2, last_arbiter_step=1, arbiter_interval=3, significant_event=True)
+
+
+def test_arbiter_guardrail_no_hypotheses_forces_explore():
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=[],
+            all_tables=["orders"],
+            steps_done=3,
+            budget=20,
+            recent_phases=[],
+            config=NemoConfig(),
+            client=None,
+        )
+    )
+    assert decision.phase == "explore"
+    assert decision.hypothesis_id is None
+
+
+def test_arbiter_guardrail_budget_exhaustion_forces_exploit():
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_1",
+            claim="A",
+            source_insight_id="insight_1",
+            initial_confidence=0.6,
+            status="proposed",
+            priority=0.4,
+        ),
+        HypothesisRecord(
+            hypothesis_id="hyp_2",
+            claim="B",
+            source_insight_id="insight_2",
+            initial_confidence=0.8,
+            status="proposed",
+            priority=0.9,
+        ),
+    ]
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=hypotheses,
+            all_tables=["orders"],
+            steps_done=9,
+            budget=10,
+            recent_phases=[],
+            config=NemoConfig(),
+            client=None,
+        )
+    )
+    assert decision.phase == "exploit"
+    assert decision.hypothesis_id == "hyp_2"
+
+
+def test_arbiter_guardrail_mid_validation_continues():
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_active",
+            claim="Supplier X is elevated",
+            source_insight_id="insight_3",
+            initial_confidence=0.8,
+            status="testing",
+            validation_step=2,
+        )
+    ]
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=hypotheses,
+            all_tables=["orders"],
+            steps_done=4,
+            budget=20,
+            recent_phases=[],
+            config=NemoConfig(max_validation_steps=5),
+            client=None,
+        )
+    )
+    assert decision.phase == "exploit"
+    assert decision.hypothesis_id == "hyp_active"
+
+
+def test_arbiter_llm_path_uses_structured_output():
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def parse(self, **kwargs):
+            self.kwargs = kwargs
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": PhaseDecision(
+                        phase="exploit",
+                        hypothesis_id="hyp_llm",
+                        reasoning="Highest business impact.",
+                    ),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_llm",
+            claim="Return rates doubled",
+            source_insight_id="insight_x",
+            initial_confidence=0.7,
+            status="proposed",
+            priority=0.7,
+        )
+    ]
+    fake_client = _FakeClient()
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=hypotheses,
+            all_tables=["orders"],
+            steps_done=3,
+            budget=20,
+            recent_phases=[PhaseDecision(phase="explore", reasoning="Need backlog first.")],
+            config=NemoConfig(),
+            client=fake_client,  # type: ignore[arg-type]
+            elapsed_minutes=1.0,
+            time_budget_minutes=30.0,
+        )
+    )
+    assert decision.phase == "exploit"
+    assert decision.hypothesis_id == "hyp_llm"
+    assert fake_client.responses.kwargs is not None
+    assert fake_client.responses.kwargs["text_format"] is PhaseDecision
+
+
+def test_validator_plans_step_with_structured_output():
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def parse(self, **kwargs):
+            self.kwargs = kwargs
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": Hypothesis(
+                        question="Does the signal hold by customer segment?",
+                        reasoning="Segment check validates breadth versus concentration.",
+                        sql='SELECT "segment", AVG("amount") AS avg_amount FROM "orders" GROUP BY 1 LIMIT 200',
+                        table="orders",
+                    ),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    record = HypothesisRecord(
+        hypothesis_id="hyp_v1",
+        claim="Supplier X has elevated return rates.",
+        source_insight_id="insight_1",
+        initial_confidence=0.72,
+        status="testing",
+        validation_step=1,
+    )
+    client = _FakeClient()
+    planned = asyncio.run(
+        plan_validation_step(
+            hypothesis=record,
+            notebook=Notebook(),
+            schema_context='orders("segment", "amount")',
+            config=NemoConfig(),
+            client=client,  # type: ignore[arg-type]
+        )
+    )
+    assert planned.table == "orders"
+    assert "segment" in planned.question.lower()
+    assert client.responses.kwargs is not None
+    assert client.responses.kwargs["text_format"] is Hypothesis
+
+
+def test_verdict_short_circuit_logic_and_render():
+    record = HypothesisRecord(
+        hypothesis_id="hyp_v2",
+        claim="Revenue drop is caused by AUTO segment contraction.",
+        source_insight_id="insight_2",
+        initial_confidence=0.68,
+        status="testing",
+    )
+    record.evidence_chain = []
+    assert not should_render_verdict(record, max_validation_steps=5)
+
+    record.validation_step = 1
+    record.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="contradicts", note="Signal fails to reproduce."),
+    ]
+    assert should_render_verdict(record, max_validation_steps=5, latest_relationship="contradicts")
+
+    class _FakeResponses:
+        def parse(self, **kwargs):
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": type(
+                        "Parsed",
+                        (),
+                        {
+                            "status": "invalidated",
+                            "confidence": 0.86,
+                            "verdict": "The core signal did not reproduce across the baseline comparison.",
+                        },
+                    )(),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    status, confidence, verdict = asyncio.run(
+        render_verdict(
+            hypothesis=record,
+            evidence_chain=[
+                {"insight_id": "i1", "relationship": "contradicts", "note": "Signal fails to reproduce."}
+            ],
+            config=NemoConfig(),
+            client=_FakeClient(),  # type: ignore[arg-type]
+        )
+    )
+    assert status == "invalidated"
+    assert confidence == 0.86
+    assert "did not reproduce" in verdict
+
+
+def test_validation_evidence_classification():
+    assert classify_validation_evidence("Result is only for one specific segment.") == "narrows"
+    assert classify_validation_evidence("After controlling for seasonality, effect disappears.") == "confounds"
+    assert classify_validation_evidence("The hypothesis is not supported and fails to reproduce.") == "contradicts"
+    assert classify_validation_evidence("Effect remains strong versus baseline.") == "supports"
 
 
 def test_format_notebook_empty():

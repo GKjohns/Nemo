@@ -6,6 +6,7 @@ import json
 import re
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,14 +20,19 @@ from nemo.ingest.joins import discover_joins
 from nemo.ingest.profile import profile_all
 from nemo.planner import (
     GeneratorContext,
+    classify_validation_evidence,
     dedupe_frontier,
     derive_recent_insight_keys,
     get_all_generators,
     is_saturated,
+    plan_validation_step,
+    render_verdict,
     score_frontier,
     select_next,
+    should_render_verdict,
 )
-from nemo.planner.models import FrontierItem, HypothesisRecord
+from nemo.planner.arbiter import decide_phase, should_consult_arbiter
+from nemo.planner.models import EvidenceLink, FrontierItem, HypothesisRecord, PhaseDecision
 from nemo.planner.strategist import (
     Hypothesis,
     InterpretationResult,
@@ -286,6 +292,10 @@ class NemoEngine:
         recent_claims: list[str] = []
         stagnation_count = 0
         force_diversify = False
+        recent_phases: list[PhaseDecision] = []
+        current_decision: PhaseDecision | None = None
+        last_arbiter_step = 0
+        significant_event = False
 
         step_budget = max_steps if max_steps is not None else int(self.config.max_steps)
         time_budget_minutes = (
@@ -323,43 +333,61 @@ class NemoEngine:
             if elapsed_minutes >= time_budget_minutes:
                 break
 
+            next_step_num = steps_done + 1
+            if should_consult_arbiter(
+                step_num=next_step_num,
+                last_arbiter_step=last_arbiter_step,
+                arbiter_interval=int(self.config.arbiter_interval),
+                significant_event=significant_event,
+            ):
+                current_decision = await decide_phase(
+                    notebook=notebook,
+                    hypotheses=hypotheses,
+                    all_tables=all_tables,
+                    steps_done=steps_done,
+                    budget=step_budget,
+                    recent_phases=recent_phases,
+                    config=self.config,
+                    client=self._llm_client,
+                    elapsed_minutes=elapsed_minutes,
+                    time_budget_minutes=time_budget_minutes,
+                )
+                recent_phases = (recent_phases + [current_decision])[-10:]
+                last_arbiter_step = next_step_num
+                significant_event = False
+                await self.bus.emit(
+                    NemoEvent(
+                        type=EventType.PHASE_DECIDED,
+                        run_id=run_id,
+                        step_num=next_step_num,
+                        payload={
+                            "phase": current_decision.phase,
+                            "hypothesis_id": current_decision.hypothesis_id,
+                            "reasoning": current_decision.reasoning,
+                        },
+                    )
+                )
+
+            if current_decision is None:
+                current_decision = PhaseDecision(
+                    phase="explore",
+                    reasoning="Starting exploration with no prior phase decision.",
+                )
+
             steps_done += 1
 
             # --- PLAN: ask the LLM what to investigate next ---
             coverage_context = _build_coverage_context(notebook, all_tables, self.config.max_steps_per_theme)
             frontier_hints = self._build_strategist_frontier_hints(profiles, joins)
-            planning_feedback = (
-                "The prior steps are showing diminishing returns. "
-                "Choose a materially different investigation touching a different table/theme."
-                if force_diversify
-                else None
-            )
-            try:
-                hypothesis = await plan_next_step(
-                    notebook,
-                    schema_ctx,
-                    self.config,
-                    self._llm_client,
-                    coverage_context=coverage_context,
-                    frontier_hints=frontier_hints,
-                    planning_feedback=planning_feedback,
-                )
-            except Exception as exc:  # noqa: BLE001
-                errors += 1
-                await self.bus.emit(
-                    NemoEvent(
-                        type=EventType.STEP_ERROR,
-                        run_id=run_id, step_num=steps_done,
-                        payload={"phase": "planning", "error": str(exc), "will_retry": False},
+            validation_target: HypothesisRecord | None = None
+            if current_decision.phase == "explore":
+                planning_feedback_parts: list[str] = []
+                if force_diversify:
+                    planning_feedback_parts.append(
+                        "The prior steps are showing diminishing returns. "
+                        "Choose a materially different investigation touching a different table/theme."
                     )
-                )
-                continue
-
-            if _is_duplicate_question(
-                hypothesis.question,
-                recent_questions,
-                threshold=float(self.config.question_similarity_threshold),
-            ):
+                planning_feedback = "\n".join(planning_feedback_parts) if planning_feedback_parts else None
                 try:
                     hypothesis = await plan_next_step(
                         notebook,
@@ -368,14 +396,79 @@ class NemoEngine:
                         self._llm_client,
                         coverage_context=coverage_context,
                         frontier_hints=frontier_hints,
-                        planning_feedback=(
-                            "Your prior question is too similar to recent questions. "
-                            "Ask a genuinely different question, ideally on a different table."
-                        ),
+                        planning_feedback=planning_feedback,
                     )
-                except Exception:  # noqa: BLE001
-                    pass
-            recent_questions = (recent_questions + [hypothesis.question])[-20:]
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    await self.bus.emit(
+                        NemoEvent(
+                            type=EventType.STEP_ERROR,
+                            run_id=run_id,
+                            step_num=steps_done,
+                            payload={"phase": "planning", "error": str(exc), "will_retry": False},
+                        )
+                    )
+                    continue
+
+                if _is_duplicate_question(
+                    hypothesis.question,
+                    recent_questions,
+                    threshold=float(self.config.question_similarity_threshold),
+                ):
+                    try:
+                        hypothesis = await plan_next_step(
+                            notebook,
+                            schema_ctx,
+                            self.config,
+                            self._llm_client,
+                            coverage_context=coverage_context,
+                            frontier_hints=frontier_hints,
+                            planning_feedback=(
+                                "Your prior question is too similar to recent questions. "
+                                "Ask a genuinely different question, ideally on a different table."
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                recent_questions = (recent_questions + [hypothesis.question])[-20:]
+            else:
+                if current_decision.hypothesis_id:
+                    validation_target = next(
+                        (h for h in hypotheses if h.hypothesis_id == current_decision.hypothesis_id),
+                        None,
+                    )
+                if validation_target is None:
+                    candidates = [h for h in hypotheses if h.status in {"proposed", "testing"}]
+                    validation_target = max(candidates, key=lambda h: float(h.priority)) if candidates else None
+                if validation_target is None:
+                    current_decision = PhaseDecision(
+                        phase="explore",
+                        reasoning="No eligible hypothesis found for exploit; continuing explore.",
+                    )
+                    continue
+
+                if validation_target.status == "proposed":
+                    validation_target.status = "testing"
+                validation_target.updated_at = datetime.now(tz=timezone.utc)
+                try:
+                    hypothesis = await plan_validation_step(
+                        hypothesis=validation_target,
+                        notebook=notebook,
+                        schema_context=schema_ctx,
+                        config=self.config,
+                        client=self._llm_client,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    await self.bus.emit(
+                        NemoEvent(
+                            type=EventType.STEP_ERROR,
+                            run_id=run_id,
+                            step_num=steps_done,
+                            payload={"phase": "validation_planning", "error": str(exc), "will_retry": False},
+                        )
+                    )
+                    continue
 
             await self.bus.emit(
                 NemoEvent(
@@ -387,6 +480,8 @@ class NemoEngine:
                         "reasoning": hypothesis.reasoning,
                         "sql": hypothesis.sql,
                         "table": hypothesis.table,
+                        "phase": current_decision.phase,
+                        "hypothesis_id": validation_target.hypothesis_id if validation_target else None,
                     },
                 )
             )
@@ -405,6 +500,8 @@ class NemoEngine:
                         "hypothesis": {
                             "question": hypothesis.question,
                             "reasoning": hypothesis.reasoning,
+                            "phase": current_decision.phase,
+                            "hypothesis_id": validation_target.hypothesis_id if validation_target else None,
                         },
                     },
                 )
@@ -531,6 +628,7 @@ class NemoEngine:
                 )
                 hypotheses.append(hypothesis_record)
                 self.store.save_hypothesis(run_id, hypothesis_record.model_dump(mode="json"))
+                significant_event = True
                 await self.bus.emit(
                     NemoEvent(
                         type=EventType.HYPOTHESIS_PROPOSED,
@@ -547,6 +645,68 @@ class NemoEngine:
                         },
                     )
                 )
+
+            if validation_target is not None:
+                relationship = classify_validation_evidence(
+                    f"{interpretation.claim}\n{interpretation.reasoning}"
+                )
+                validation_target.evidence_chain.append(
+                    EvidenceLink(
+                        insight_id=insight_id,
+                        relationship=relationship,
+                        note=interpretation.claim,
+                    )
+                )
+                validation_target.validation_step += 1
+                validation_target.updated_at = datetime.now(tz=timezone.utc)
+
+                await self.bus.emit(
+                    NemoEvent(
+                        type=EventType.VALIDATION_STEP,
+                        run_id=run_id,
+                        step_num=steps_done,
+                        payload={
+                            "hypothesis_id": validation_target.hypothesis_id,
+                            "claim": validation_target.claim,
+                            "validation_step": validation_target.validation_step,
+                            "max_validation_steps": int(self.config.max_validation_steps),
+                            "relationship": relationship,
+                            "evidence_count": len(validation_target.evidence_chain),
+                        },
+                    )
+                )
+
+                if should_render_verdict(
+                    validation_target,
+                    max_validation_steps=int(self.config.max_validation_steps),
+                    latest_relationship=relationship,
+                ):
+                    verdict_status, verdict_confidence, verdict_text = await render_verdict(
+                        hypothesis=validation_target,
+                        evidence_chain=[item.model_dump() for item in validation_target.evidence_chain],
+                        config=self.config,
+                        client=self._llm_client,
+                    )
+                    validation_target.status = verdict_status
+                    validation_target.verdict_confidence = verdict_confidence
+                    validation_target.verdict = verdict_text
+                    significant_event = True
+                    await self.bus.emit(
+                        NemoEvent(
+                            type=EventType.HYPOTHESIS_VERDICT,
+                            run_id=run_id,
+                            step_num=steps_done,
+                            payload={
+                                "hypothesis_id": validation_target.hypothesis_id,
+                                "status": verdict_status,
+                                "verdict_confidence": verdict_confidence,
+                                "verdict": verdict_text,
+                                "evidence_count": len(validation_target.evidence_chain),
+                            },
+                        )
+                    )
+
+                self.store.save_hypothesis(run_id, validation_target.model_dump(mode="json"))
 
             # --- LINK ---
             await self.bus.emit(
