@@ -45,7 +45,7 @@ class NemoConfig:
     stagnation_step_limit: int = 3
     arbiter_interval: int = 3
     max_validation_steps: int = 5
-    arbiter_model: str = "gpt-5-mini"
+    arbiter_model: str = "gpt-5.2"
 
     # User-defined hints
     goal: str = ""

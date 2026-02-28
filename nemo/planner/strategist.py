@@ -388,8 +388,9 @@ def apply_notebook_update(notebook: Notebook, interpretation: InterpretationResu
         for q in interpretation.new_open_questions:
             if q not in entry.open_questions:
                 entry.open_questions.append(q)
-        resolved = {r.lower() for r in interpretation.resolved_questions}
-        entry.open_questions = [q for q in entry.open_questions if q.lower() not in resolved]
+        entry.open_questions = _fuzzy_resolve_questions(
+            entry.open_questions, interpretation.resolved_questions
+        )
         entry.step_count += 1
         tables = set(entry.tables_touched)
         if interpretation.tags:
@@ -417,6 +418,42 @@ def apply_notebook_update(notebook: Notebook, interpretation: InterpretationResu
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _fuzzy_resolve_questions(
+    open_questions: list[str], resolved: list[str], threshold: float = 0.55
+) -> list[str]:
+    """Remove open questions that fuzzy-match any resolved question."""
+    if not resolved:
+        return open_questions
+
+    import re
+
+    def _tokens(text: str) -> set[str]:
+        stopwords = {
+            "the", "a", "an", "of", "to", "and", "or", "in", "on", "for", "by",
+            "with", "is", "are", "was", "were", "be", "this", "that", "how", "what",
+            "which", "do", "does", "did", "from",
+        }
+        return {tok for tok in re.findall(r"[a-z0-9_]+", text.lower()) if tok not in stopwords}
+
+    def _similarity(a: str, b: str) -> float:
+        ta, tb = _tokens(a), _tokens(b)
+        if not ta or not tb:
+            return 0.0
+        intersection = len(ta & tb)
+        return max(
+            intersection / len(ta | tb),
+            intersection / min(len(ta), len(tb)),
+        )
+
+    resolved_texts = [r.strip() for r in resolved if r.strip()]
+    remaining: list[str] = []
+    for q in open_questions:
+        if any(_similarity(q, r) >= threshold for r in resolved_texts):
+            continue
+        remaining.append(q)
+    return remaining
+
 
 def _format_rows(rows: list[dict[str, Any]], columns: list[str]) -> str:
     """Format result rows as a compact text table for LLM context."""

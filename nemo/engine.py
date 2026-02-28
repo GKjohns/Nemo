@@ -264,7 +264,9 @@ class NemoEngine:
         all_tables = [p.name for p in profiles]
         recent_questions: list[str] = []
         recent_claims: list[str] = []
+        recent_themes: list[str] = []
         stagnation_count = 0
+        theme_stagnation_count = 0
         force_diversify = False
         recent_phases: list[PhaseDecision] = []
         current_decision: PhaseDecision | None = None
@@ -385,6 +387,11 @@ class NemoEngine:
                 )
             )
 
+            step_score = (
+                float(validation_target.priority)
+                if validation_target is not None
+                else _estimate_step_score(hypothesis, notebook)
+            )
             await self.bus.emit(
                 NemoEvent(
                     type=EventType.STEP_STARTED,
@@ -394,7 +401,7 @@ class NemoEngine:
                         "action": {
                             "action_type": "STRATEGIST",
                             "payload": {"table": hypothesis.table, "question": hypothesis.question},
-                            "score": 0.0,
+                            "score": step_score,
                         },
                         "hypothesis": {
                             "question": hypothesis.question,
@@ -606,7 +613,21 @@ class NemoEngine:
             else:
                 stagnation_count = 0
             recent_claims = (recent_claims + [interpretation.claim])[-20:]
-            force_diversify = stagnation_count >= max(1, int(self.config.stagnation_step_limit))
+
+            current_theme = interpretation.theme.strip().lower()
+            if recent_themes and recent_themes[-1] == current_theme:
+                theme_stagnation_count += 1
+            else:
+                theme_stagnation_count = 0
+            recent_themes = (recent_themes + [current_theme])[-10:]
+            _consecutive_same = sum(
+                1 for t in reversed(recent_themes) if t == current_theme
+            )
+
+            force_diversify = (
+                stagnation_count >= max(1, int(self.config.stagnation_step_limit))
+                or _consecutive_same >= 3
+            )
 
             await self.bus.emit(
                 NemoEvent(
@@ -1282,6 +1303,29 @@ def _target_for_payload(payload: dict[str, Any]) -> str:
     return "-"
 
 
+def _estimate_step_score(hypothesis: Hypothesis, notebook: Notebook) -> float:
+    """Estimate a score for a strategist step based on novelty signals."""
+    table = (hypothesis.table or "").strip().lower()
+    question_tokens = set(hypothesis.question.lower().split())
+    touched_tables = {t.lower() for entry in notebook.entries for t in entry.tables_touched}
+    existing_themes = {entry.theme.lower() for entry in notebook.entries}
+    existing_questions = {
+        tok
+        for entry in notebook.entries
+        for q in entry.open_questions
+        for tok in q.lower().split()
+    }
+
+    score = 0.5
+    if table and table not in touched_tables:
+        score += 0.2
+    overlap = len(question_tokens & existing_questions) / max(1, len(question_tokens))
+    score -= overlap * 0.15
+    if notebook.total_steps == 0:
+        score += 0.1
+    return max(0.0, min(1.0, score))
+
+
 def _build_coverage_context(notebook: Notebook, all_tables: list[str], max_steps_per_theme: int) -> str:
     touched = sorted({t for entry in notebook.entries for t in entry.tables_touched if t})
     untouched = sorted([t for t in all_tables if t not in set(touched)])
@@ -1289,6 +1333,24 @@ def _build_coverage_context(notebook: Notebook, all_tables: list[str], max_steps
     if notebook.entries:
         deepest = max(notebook.entries, key=lambda e: e.step_count)
         deepest_theme = f"{deepest.theme} ({deepest.step_count} steps)"
+
+    if len(all_tables) <= 1:
+        theme_lines: list[str] = []
+        for entry in sorted(notebook.entries, key=lambda e: -e.step_count):
+            depth_warning = " ⚠ OVER LIMIT" if entry.step_count >= max_steps_per_theme else ""
+            theme_lines.append(f"  - {entry.theme}: {entry.step_count} steps{depth_warning}")
+        themes_section = "\n".join(theme_lines) if theme_lines else "  (none yet)"
+        return (
+            f"Single-table dataset ({all_tables[0] if all_tables else 'unknown'}). "
+            f"Coverage is measured by theme diversity, not table count.\n"
+            f"Themes explored:\n{themes_section}\n"
+            f"Deepest theme: {deepest_theme or '(none)'}\n"
+            f"Preferred max depth per theme before pivot: {max_steps_per_theme}\n"
+            f"IMPORTANT: If a theme has hit the depth limit, pivot to a genuinely "
+            f"different analytical angle — different columns, different aggregation, "
+            f"different question type."
+        )
+
     return (
         f"Total tables: {len(all_tables)}\n"
         f"Tables explored: {', '.join(touched) if touched else '(none)'}\n"

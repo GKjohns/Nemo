@@ -24,7 +24,7 @@ question_similarity_threshold = 0.82
 stagnation_step_limit = 3
 arbiter_interval = 3
 max_validation_steps = 5
-arbiter_model = "gpt-5-mini"
+arbiter_model = "gpt-5.2"
 
 [hints]
 time_columns = []
