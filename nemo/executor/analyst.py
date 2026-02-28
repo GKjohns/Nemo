@@ -184,13 +184,18 @@ async def run_statistical_analysis(
 
     session = PythonSession(timeout_seconds=effective_timeout)
     all_sql: list[str] = []
+
+    available_tables = _format_available_tables(profiles)
     conversation: list[dict[str, Any]] = [{
         "role": "user",
         "content": (
             f"Question: {question}\n"
-            f"Primary table: {table}\n"
+            f"Primary table: {table}\n\n"
+            f"Available tables in the database (use ONLY these — no other tables exist):\n"
+            f"{available_tables}\n\n"
             f"Suggested extraction SQL:\n{extraction_sql}\n\n"
-            "Use that SQL if appropriate, but refine as needed."
+            "Use that SQL if appropriate, but refine as needed. "
+            "All SQL must reference only the tables listed above."
         ),
     }]
 
@@ -528,6 +533,20 @@ async def _notify_iteration(
     maybe_awaitable = callback(payload)
     if asyncio.iscoroutine(maybe_awaitable):
         await maybe_awaitable
+
+
+def _format_available_tables(profiles: list[TableProfile]) -> str:
+    """Build a compact table listing so the analyst knows what exists."""
+    if not profiles:
+        return "(no table profiles available)"
+    lines: list[str] = []
+    for p in profiles:
+        col_names = [col.name for col in p.columns] if p.columns else []
+        cols_str = ", ".join(col_names[:15])
+        if len(col_names) > 15:
+            cols_str += f", ... (+{len(col_names) - 15} more)"
+        lines.append(f'- "{p.name}" ({p.row_count:,} rows): {cols_str}')
+    return "\n".join(lines)
 
 
 def _quote_ident(identifier: str) -> str:

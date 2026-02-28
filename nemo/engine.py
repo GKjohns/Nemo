@@ -442,6 +442,12 @@ class NemoEngine:
             if interpretation is None:
                 continue
 
+            analysis_type = str(hypothesis.analysis_type or "sql").strip().lower()
+            if analysis_type == "statistical":
+                interpretation.confidence = _adjust_confidence_for_statistics(
+                    interpretation.confidence, result
+                )
+
             # --- RECORD ---
             source_tables = [hypothesis.table] if hypothesis.table else []
             insight_id = self.store.insert_insight(
@@ -1579,3 +1585,52 @@ async def is_semantically_duplicate(
         threshold = float(config.question_similarity_threshold)
         return _is_duplicate_question(text, candidate_texts, threshold=threshold)
     return _is_duplicate_claim(text, candidate_texts)
+
+
+def _adjust_confidence_for_statistics(
+    llm_confidence: float,
+    result: ExecutionResult,
+) -> float:
+    """Boost confidence for insights backed by statistically significant results.
+
+    The interpreter LLM assigns confidence without structural awareness of
+    p-value strength. This applies a floor based on the best p-value in the
+    result rows, so a p < 0.001 regression doesn't get scored below a
+    descriptive SQL query.
+    """
+    if not result.rows:
+        return llm_confidence
+
+    best_p: float | None = None
+    has_effect: bool = False
+    for row in result.rows:
+        p = row.get("p_value")
+        if p is None:
+            continue
+        try:
+            p_val = float(p)
+        except (TypeError, ValueError):
+            continue
+        if best_p is None or p_val < best_p:
+            best_p = p_val
+        effect = row.get("effect_size")
+        if effect is not None:
+            try:
+                if abs(float(effect)) > 0:
+                    has_effect = True
+            except (TypeError, ValueError):
+                pass
+
+    if best_p is None:
+        return llm_confidence
+
+    if best_p < 0.001 and has_effect:
+        floor = 0.85
+    elif best_p < 0.01 and has_effect:
+        floor = 0.80
+    elif best_p < 0.05:
+        floor = 0.70
+    else:
+        return llm_confidence
+
+    return min(1.0, max(llm_confidence, floor))
