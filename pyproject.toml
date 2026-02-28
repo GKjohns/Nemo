@@ -10,10 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb",
+    "numpy",
     "openai",
+    "pandas",
     "pydantic",
     "python-dotenv",
     "rich",
+    "scipy",
+    "statsmodels",
     "tomli-w",
     "typer[all]",
 ]
