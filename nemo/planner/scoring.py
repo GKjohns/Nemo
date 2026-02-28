@@ -198,7 +198,7 @@ def _rerank_top_candidates(
     client: OpenAI,
 ) -> list[FrontierItem]:
     payload = {
-        "notebook": format_notebook(notebook),
+        "notebook": format_notebook(notebook, detail="summary"),
         "candidates": [
             {
                 "action_index": idx,
