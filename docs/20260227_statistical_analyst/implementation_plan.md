@@ -713,7 +713,9 @@ print('Phase 3 e2e smoke test PASSED')
 
 ---
 
-### Phase 4: Validator Integration
+### Phase 4: Validator Integration [✅ Completed]
+
+**Status:** Completed on 2026-02-27 (unit tests passing; e2e smoke run requires OPENAI_API_KEY and was skipped in no-key mode)
 
 **Work:**
 - Update `Hypothesis` output from `plan_validation_step` to support `analysis_type`
@@ -756,7 +758,6 @@ with tempfile.TemporaryDirectory() as td:
         max_steps=5, max_runtime_minutes=5,
         arbiter_interval=2,  # consult arbiter more often
         openai_api_key=os.getenv('OPENAI_API_KEY'),
-        enable_statistical_analysis=True,
     )
     engine = NemoEngine(store, config, EventBus())
     run_id = asyncio.run(engine.run(max_steps=5))

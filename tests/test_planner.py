@@ -637,6 +637,7 @@ def test_validator_plans_step_with_structured_output():
                         reasoning="Segment check validates breadth versus concentration.",
                         sql='SELECT "segment", AVG("amount") AS avg_amount FROM "orders" GROUP BY 1 LIMIT 200',
                         table="orders",
+                        analysis_type="statistical",
                     ),
                     "output": [],
                 },
@@ -665,7 +666,75 @@ def test_validator_plans_step_with_structured_output():
         )
     )
     assert planned.table == "orders"
+    assert planned.analysis_type == "statistical"
     assert "segment" in planned.question.lower()
+    assert client.responses.kwargs is not None
+    assert client.responses.kwargs["text_format"] is Hypothesis
+
+
+def test_validator_parses_analysis_type_from_json_output():
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def parse(self, **kwargs):
+            self.kwargs = kwargs
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": None,
+                    "output": [
+                        type(
+                            "Message",
+                            (),
+                            {
+                                "type": "message",
+                                "content": [
+                                    type(
+                                        "TextBlock",
+                                        (),
+                                        {
+                                            "text": (
+                                                '{"question":"Does this effect remain after controls?",'
+                                                '"reasoning":"Needs regression-based validation.",'
+                                                '"sql":"SELECT \\"amount\\", \\"segment\\", \\"region\\" FROM \\"orders\\" LIMIT 200",'
+                                                '"table":"orders",'
+                                                '"analysis_type":"statistical"}'
+                                            )
+                                        },
+                                    )()
+                                ],
+                            },
+                        )()
+                    ],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    record = HypothesisRecord(
+        hypothesis_id="hyp_v2",
+        claim="Segment A outperforms Segment B after controls.",
+        source_insight_id="insight_2",
+        initial_confidence=0.74,
+        status="testing",
+        validation_step=2,
+    )
+    client = _FakeClient()
+    planned = asyncio.run(
+        plan_validation_step(
+            hypothesis=record,
+            notebook=Notebook(),
+            schema_context='orders("amount", "segment", "region")',
+            config=NemoConfig(),
+            client=client,  # type: ignore[arg-type]
+        )
+    )
+    assert planned.analysis_type == "statistical"
+    assert "controls" in planned.question.lower()
     assert client.responses.kwargs is not None
     assert client.responses.kwargs["text_format"] is Hypothesis
 

@@ -16,14 +16,18 @@ VALIDATION_STEPS = ("reproduce", "segment", "confound", "counter", "quantify")
 
 VALIDATOR_SYSTEM = """\
 You are a senior analyst validating a previously proposed hypothesis.
-Generate one focused SQL investigation step to test the hypothesis.
+Generate one focused validation step to test the hypothesis.
 
 Rules:
 - Use DuckDB-compatible SQL with double-quoted identifiers.
 - Ask a materially different validation question each step.
 - Keep queries efficient and always include LIMIT 200.
 - Prefer subgroup checks, controls, and disconfirming tests over repeats.
-- Check sample values in the schema to write correct SQL (values may need casting)."""
+- Check sample values in the schema to write correct SQL (values may need casting).
+- Choose analysis_type:
+  - "sql" for direct descriptive checks and simple comparisons.
+  - "statistical" when the step needs inferential testing (e.g., significance tests, confidence intervals, controlled regressions).
+- If analysis_type is "statistical", the SQL should be an extraction query that returns the columns needed for downstream statistical analysis."""
 
 VERDICT_SYSTEM = """\
 You are a rigorous analyst rendering a final verdict on a hypothesis.
@@ -35,19 +39,22 @@ Return:
 
 STEP_GUIDANCE: dict[str, str] = {
     "reproduce": (
-        "Re-run the core signal with a robust aggregation. Confirm whether the signal exists at all."
+        "Re-run the core signal with a robust aggregation. Confirm whether the signal exists at all. "
+        "Use analysis_type='statistical' when reproducing the claim requires a formal significance check."
     ),
     "segment": (
         "Test the claim across meaningful subgroups. Identify whether it is broad or concentrated."
     ),
     "confound": (
-        "Control for likely confounders and check if the effect persists after adjustment."
+        "Control for likely confounders and check if the effect persists after adjustment. "
+        "Prefer analysis_type='statistical' when adjustment requires regression or controlled inference."
     ),
     "counter": (
         "Actively look for disconfirming evidence or counter-examples that could break the claim."
     ),
     "quantify": (
-        "Quantify practical significance with effect size framing and clear comparison baselines."
+        "Quantify practical significance with effect size framing and clear comparison baselines. "
+        "Use analysis_type='statistical' when confidence intervals or uncertainty estimates are needed."
     ),
 }
 
@@ -95,7 +102,7 @@ Plan exactly one validation query for the {step_name.upper()} step.
 Guidance: {guidance}
 
 Return JSON (no markdown):
-{{"question": "...", "reasoning": "...", "sql": "...", "table": "..."}}"""
+{{"question": "...", "reasoning": "...", "sql": "...", "table": "...", "analysis_type": "sql|statistical"}}"""
 
     for attempt in range(3):
         try:
