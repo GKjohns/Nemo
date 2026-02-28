@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Literal
 
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
@@ -73,44 +74,108 @@ class InterpretationResult(BaseModel):
 # Schema context builder
 # ---------------------------------------------------------------------------
 
-def build_schema_context(profiles: list[TableProfile]) -> str:
+def build_schema_context(
+    profiles: list[TableProfile],
+    focus_tables: set[str] | None = None,
+    max_samples: int = 5,
+) -> str:
     """Compact schema representation for LLM prompts."""
+    focus_norm = {table.strip().lower() for table in (focus_tables or set()) if table and table.strip()}
+    sample_limit = max(0, int(max_samples))
     parts: list[str] = []
-    for p in sorted(profiles, key=lambda p: p.name):
-        cols: list[str] = []
-        for c in p.columns:
-            extras: list[str] = []
-            if c.distinct_count:
-                extras.append(f"{c.distinct_count} distinct")
-            if c.null_pct > 0.01:
-                extras.append(f"{c.null_pct:.0%} null")
-            if c.mean is not None:
-                extras.append(f"mean={c.mean:.1f}")
-            if c.min_val is not None and c.max_val is not None:
-                extras.append(f"range={c.min_val}..{c.max_val}")
-            if c.sample_values:
-                samples = ", ".join(repr(v) for v in c.sample_values[:8])
-                extras.append(f"e.g. {samples}")
-            extra_str = f" ({', '.join(extras)})" if extras else ""
-            cols.append(f"    {c.name} {c.dtype}{extra_str}")
-        parts.append(f"  {p.name} ({p.row_count:,} rows):\n" + "\n".join(cols))
+    for profile in sorted(profiles, key=lambda p: p.name):
+        if focus_tables is None or profile.name.lower() in focus_norm:
+            parts.append(_render_full_schema_table(profile, max_samples=sample_limit))
+            continue
+        parts.append(_render_compact_schema_table(profile))
     return "\n".join(parts)
 
 
-def format_notebook(notebook: Notebook) -> str:
+def _render_full_schema_table(profile: TableProfile, *, max_samples: int) -> str:
+    cols: list[str] = []
+    for column in profile.columns:
+        extras: list[str] = []
+        if column.distinct_count:
+            extras.append(f"{column.distinct_count} distinct")
+        if column.null_pct > 0.01:
+            extras.append(f"{column.null_pct:.0%} null")
+        if column.mean is not None:
+            extras.append(f"mean={column.mean:.1f}")
+        if column.min_val is not None and column.max_val is not None:
+            extras.append(f"range={column.min_val}..{column.max_val}")
+        if column.sample_values and max_samples > 0:
+            samples = ", ".join(repr(v) for v in column.sample_values[:max_samples])
+            extras.append(f"e.g. {samples}")
+        extra_str = f" ({', '.join(extras)})" if extras else ""
+        cols.append(f"    {column.name} {column.dtype}{extra_str}")
+    return f"  {profile.name} ({profile.row_count:,} rows):\n" + "\n".join(cols)
+
+
+def _render_compact_schema_table(profile: TableProfile) -> str:
+    column_names = ", ".join(column.name for column in profile.columns) or "(no columns)"
+    return f"  {profile.name} ({profile.row_count:,} rows, {len(profile.columns)} columns): {column_names}"
+
+
+def format_notebook(
+    notebook: Notebook,
+    detail: Literal["full", "summary", "headlines"] = "full",
+    max_findings_per_theme: int = 5,
+    max_questions_per_theme: int = 3,
+    max_themes: int = 10,
+) -> str:
     """Format notebook entries for inclusion in LLM prompts."""
     if not notebook.entries:
         return "(empty — this is the start of your investigation)"
+    max_findings = max(0, int(max_findings_per_theme))
+    max_questions = max(0, int(max_questions_per_theme))
+    max_theme_count = max(1, int(max_themes))
+
+    sorted_entries = sorted(
+        notebook.entries,
+        key=lambda entry: (int(entry.step_count), len(entry.key_findings)),
+        reverse=True,
+    )
+    displayed_entries = sorted_entries[:max_theme_count]
+    collapsed_entries = sorted_entries[max_theme_count:]
+
     parts: list[str] = []
-    for entry in notebook.entries:
-        findings = "\n".join(f"    - {f}" for f in entry.key_findings) if entry.key_findings else "    (none yet)"
-        questions = "\n".join(f"    - {q}" for q in entry.open_questions) if entry.open_questions else "    (none)"
-        parts.append(
-            f"  [{entry.theme}] ({entry.step_count} steps, tables: {', '.join(entry.tables_touched)})\n"
-            f"    Summary: {entry.summary}\n"
-            f"    Key findings:\n{findings}\n"
-            f"    Open questions:\n{questions}"
-        )
+    for entry in displayed_entries:
+        tables = ", ".join(entry.tables_touched) if entry.tables_touched else "(none)"
+        findings = entry.key_findings
+        questions = entry.open_questions
+        if detail == "full":
+            findings = findings[-max_findings:] if max_findings else []
+            questions = questions[-max_questions:] if max_questions else []
+            findings_text = "\n".join(f"    - {f}" for f in findings) if findings else "    (none yet)"
+            questions_text = "\n".join(f"    - {q}" for q in questions) if questions else "    (none)"
+            parts.append(
+                f"  [{entry.theme}] ({entry.step_count} steps, tables: {tables})\n"
+                f"    Summary: {entry.summary}\n"
+                f"    Key findings:\n{findings_text}\n"
+                f"    Open questions:\n{questions_text}"
+            )
+        elif detail == "summary":
+            summary_findings = findings[-2:]
+            summary_questions = questions[-1:]
+            findings_text = "\n".join(f"    - {f}" for f in summary_findings) if summary_findings else "    (none yet)"
+            questions_text = "\n".join(f"    - {q}" for q in summary_questions) if summary_questions else "    (none)"
+            parts.append(
+                f"  [{entry.theme}] ({entry.step_count} steps, tables: {tables})\n"
+                f"    Summary: {entry.summary}\n"
+                f"    Recent findings:\n{findings_text}\n"
+                f"    Top open question:\n{questions_text}"
+            )
+        else:
+            latest_finding = findings[-1] if findings else "(no findings yet)"
+            parts.append(
+                f"  [{entry.theme}] ({entry.step_count} steps, {len(entry.key_findings)} findings) "
+                f"- latest: {latest_finding}"
+            )
+
+    if collapsed_entries:
+        collapsed_text = ", ".join(f"{entry.theme} ({entry.step_count} steps)" for entry in collapsed_entries)
+        parts.append(f"  Earlier themes: {collapsed_text}")
+
     return "\n\n".join(parts)
 
 
@@ -258,15 +323,29 @@ def _format_goal_section(goal: str) -> str:
 
 async def plan_next_step(
     notebook: Notebook,
-    schema_context: str,
+    schema_context: str | None,
     config: NemoConfig,
     client: OpenAI,
     error_context: dict[str, str] | None = None,
     coverage_context: str | None = None,
     frontier_hints: str | None = None,
     planning_feedback: str | None = None,
+    profiles: list[TableProfile] | None = None,
 ) -> Hypothesis:
     """Ask the LLM to propose the next investigation step."""
+    scoped_schema_context = schema_context or ""
+    if profiles is not None:
+        focus_tables = _infer_focus_tables_for_planning(
+            notebook=notebook,
+            frontier_hints=frontier_hints,
+            profiles=profiles,
+        )
+        scoped_schema_context = build_schema_context(
+            profiles,
+            focus_tables=focus_tables,
+            max_samples=5,
+        )
+
     goal_section = _format_goal_section(config.goal)
     if error_context:
         user_content = STRATEGIST_RETRY_USER.format(
@@ -275,8 +354,8 @@ async def plan_next_step(
         )
         messages = [
             {"role": "user", "content": STRATEGIST_USER.format(
-                schema=schema_context,
-                notebook=format_notebook(notebook),
+                schema=scoped_schema_context,
+                notebook=format_notebook(notebook, detail="full"),
                 coverage=coverage_context or "(not provided)",
                 frontier_hints=frontier_hints or "(none)",
                 goal_section=goal_section,
@@ -286,8 +365,8 @@ async def plan_next_step(
     else:
         messages = [
             {"role": "user", "content": STRATEGIST_USER.format(
-                schema=schema_context,
-                notebook=format_notebook(notebook),
+                schema=scoped_schema_context,
+                notebook=format_notebook(notebook, detail="full"),
                 coverage=coverage_context or "(not provided)",
                 frontier_hints=frontier_hints or "(none)",
                 goal_section=goal_section,
@@ -324,15 +403,25 @@ async def interpret_and_update(
     hypothesis: Hypothesis,
     result: ExecutionResult,
     notebook: Notebook,
-    schema_context: str,
+    schema_context: str | None,
     config: NemoConfig,
     client: OpenAI,
+    profiles: list[TableProfile] | None = None,
 ) -> InterpretationResult:
     """Ask the LLM to interpret a query result and update the notebook."""
+    scoped_schema_context = schema_context or ""
+    if profiles is not None:
+        focus_tables = {hypothesis.table.strip()} if hypothesis.table.strip() else None
+        scoped_schema_context = build_schema_context(
+            profiles,
+            focus_tables=focus_tables,
+            max_samples=5,
+        )
+
     if result.row_count == 0:
         user_content = INTERPRETER_EMPTY_USER.format(
-            schema=schema_context,
-            notebook=format_notebook(notebook),
+            schema=scoped_schema_context,
+            notebook=format_notebook(notebook, detail="full"),
             question=hypothesis.question,
             reasoning=hypothesis.reasoning,
             sql=hypothesis.sql,
@@ -340,8 +429,8 @@ async def interpret_and_update(
     else:
         rows_preview = _format_rows(result.rows[:20], result.column_names)
         user_content = INTERPRETER_USER.format(
-            schema=schema_context,
-            notebook=format_notebook(notebook),
+            schema=scoped_schema_context,
+            notebook=format_notebook(notebook, detail="full"),
             question=hypothesis.question,
             reasoning=hypothesis.reasoning,
             sql=hypothesis.sql,
@@ -478,6 +567,29 @@ def _format_rows(rows: list[dict[str, Any]], columns: list[str]) -> str:
     if len(rows) > 20:
         lines.append(f"  ... ({len(rows)} rows total)")
     return "\n".join(lines)
+
+
+def _infer_focus_tables_for_planning(
+    *,
+    notebook: Notebook,
+    frontier_hints: str | None,
+    profiles: list[TableProfile],
+) -> set[str] | None:
+    focus_tables: set[str] = set()
+    if notebook.entries:
+        current_entry = max(notebook.entries, key=lambda entry: int(entry.step_count))
+        focus_tables.update(table for table in current_entry.tables_touched if table)
+
+    hints_text = (frontier_hints or "").lower()
+    if hints_text.strip():
+        for profile in profiles:
+            pattern = rf"\b{re.escape(profile.name.lower())}\b"
+            if re.search(pattern, hints_text):
+                focus_tables.add(profile.name)
+
+    if not focus_tables:
+        return None
+    return focus_tables
 
 
 def _fmt_val(v: Any) -> str:

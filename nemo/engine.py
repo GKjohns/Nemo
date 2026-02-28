@@ -50,7 +50,6 @@ from nemo.planner.strategist import (
     InterpretationResult,
     Notebook,
     apply_notebook_update,
-    build_schema_context,
     interpret_and_update,
     plan_next_step,
 )
@@ -260,7 +259,6 @@ class NemoEngine:
         errors = 0
         status = "completed"
 
-        schema_ctx = build_schema_context(profiles)
         notebook = self._load_or_create_notebook(run_id)
         hypotheses = self._load_hypotheses(run_id)
         all_tables = [p.name for p in profiles]
@@ -285,11 +283,12 @@ class NemoEngine:
             frontier_hints = self._build_strategist_frontier_hints(notebook, profiles, joins)
             hypothesis = await plan_next_step(
                 notebook,
-                schema_ctx,
+                None,
                 self.config,
                 self._llm_client,
                 coverage_context=coverage_context,
                 frontier_hints=frontier_hints,
+                profiles=profiles,
             )
             await self.bus.emit(
                 NemoEvent(
@@ -361,7 +360,6 @@ class NemoEngine:
                     step_num=steps_done,
                     current_decision=current_decision,
                     notebook=notebook,
-                    schema_ctx=schema_ctx,
                     profiles=profiles,
                     joins=joins,
                     all_tables=all_tables,
@@ -423,7 +421,6 @@ class NemoEngine:
                 step_num=steps_done,
                 hypothesis=hypothesis,
                 notebook=notebook,
-                schema_ctx=schema_ctx,
                 profiles=profiles,
             )
             errors += execute_errors
@@ -436,7 +433,7 @@ class NemoEngine:
                 hypothesis=hypothesis,
                 result=result,
                 notebook=notebook,
-                schema_ctx=schema_ctx,
+                profiles=profiles,
             )
             errors += interpret_errors
             if interpretation is None:
@@ -698,7 +695,6 @@ class NemoEngine:
         step_num: int,
         current_decision: PhaseDecision,
         notebook: Notebook,
-        schema_ctx: str,
         profiles: list,
         joins: list,
         all_tables: list[str],
@@ -721,12 +717,13 @@ class NemoEngine:
             try:
                 hypothesis = await plan_next_step(
                     notebook,
-                    schema_ctx,
+                    None,
                     self.config,
                     self._llm_client,
                     coverage_context=coverage_context,
                     frontier_hints=frontier_hints,
                     planning_feedback=planning_feedback,
+                    profiles=profiles,
                 )
             except Exception as exc:  # noqa: BLE001
                 await self._emit_step_error(run_id, step_num, "planning", str(exc), will_retry=False)
@@ -742,7 +739,7 @@ class NemoEngine:
                 try:
                     hypothesis = await plan_next_step(
                         notebook,
-                        schema_ctx,
+                        None,
                         self.config,
                         self._llm_client,
                         coverage_context=coverage_context,
@@ -751,6 +748,7 @@ class NemoEngine:
                             "Your prior question is too similar to recent questions. "
                             "Ask a genuinely different question, ideally on a different table."
                         ),
+                        profiles=profiles,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -784,9 +782,10 @@ class NemoEngine:
             hypothesis = await plan_validation_step(
                 hypothesis=validation_target,
                 notebook=notebook,
-                schema_context=schema_ctx,
+                schema_context=None,
                 config=self.config,
                 client=self._llm_client,
+                profiles=profiles,
             )
         except Exception as exc:  # noqa: BLE001
             await self._emit_step_error(
@@ -806,7 +805,7 @@ class NemoEngine:
         step_num: int,
         hypothesis: Hypothesis,
         notebook: Notebook,
-        schema_ctx: str,
+        schema_ctx: str | None = None,
         profiles: list,
     ) -> tuple[Hypothesis, Any, int, bool]:
         analysis_type = str(hypothesis.analysis_type or "sql").strip().lower()
@@ -891,10 +890,11 @@ class NemoEngine:
             try:
                 hypothesis = await plan_next_step(
                     notebook,
-                    schema_ctx,
+                    None,
                     self.config,
                     self._llm_client,
                     error_context={"error": result.error, "sql": hypothesis.sql},
+                    profiles=profiles,
                 )
                 result = execute_query(self.store, hypothesis.sql, self.config)
             except Exception:  # noqa: BLE001
@@ -956,7 +956,7 @@ class NemoEngine:
         hypothesis: Hypothesis,
         result: Any,
         notebook: Notebook,
-        schema_ctx: str,
+        profiles: list,
     ) -> tuple[InterpretationResult | None, int]:
         await self._emit_step_phase(run_id, step_num, "interpreting")
         try:
@@ -964,9 +964,10 @@ class NemoEngine:
                 hypothesis,
                 result,
                 notebook,
-                schema_ctx,
+                None,
                 self.config,
                 self._llm_client,
+                profiles=profiles,
             )
         except Exception as exc:  # noqa: BLE001
             await self._emit_step_error(run_id, step_num, "interpreting", str(exc), will_retry=False)

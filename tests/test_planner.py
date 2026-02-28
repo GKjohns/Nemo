@@ -402,6 +402,14 @@ def test_build_schema_context_is_compact():
     assert "range=2024-01-01..2024-06-30" in ctx
 
 
+def test_build_schema_context_scopes_non_focus_tables_to_compact_lines():
+    profiles = [_orders_profile(), _customers_profile()]
+    ctx = build_schema_context(profiles, focus_tables={"orders"}, max_samples=1)
+    assert "orders (1,000 rows):" in ctx
+    assert "customers (350 rows, 4 columns): customer_id, region, signup_date, lifetime_value" in ctx
+    assert "customers (350 rows):" not in ctx
+
+
 def test_build_coverage_context_reports_unexplored_tables():
     notebook = Notebook(entries=[
         NotebookEntry(
@@ -826,6 +834,90 @@ def test_format_notebook_with_entries():
     assert "What drove Q1?" in text
 
 
+def test_format_notebook_summary_detail_caps_recent_items():
+    notebook = Notebook(
+        entries=[
+            NotebookEntry(
+                theme="Revenue",
+                summary="Revenue moved unevenly by segment.",
+                key_findings=["f1", "f2", "f3"],
+                open_questions=["q1", "q2"],
+                tables_touched=["orders"],
+                step_count=3,
+            ),
+        ],
+        total_steps=3,
+    )
+    text = format_notebook(notebook, detail="summary")
+    assert "Recent findings" in text
+    assert "Top open question" in text
+    assert "- f2" in text
+    assert "- f3" in text
+    assert "- q2" in text
+    assert "- q1" not in text
+
+
+def test_format_notebook_headlines_detail():
+    notebook = Notebook(
+        entries=[
+            NotebookEntry(
+                theme="Quality",
+                summary="Quality baseline.",
+                key_findings=["Returns elevated in one supplier cohort."],
+                open_questions=[],
+                tables_touched=["orders"],
+                step_count=1,
+            )
+        ],
+        total_steps=1,
+    )
+    text = format_notebook(notebook, detail="headlines")
+    assert "latest: Returns elevated in one supplier cohort." in text
+    assert "1 findings" in text
+    assert "Summary:" not in text
+
+
+def test_format_notebook_limits_theme_count_with_earlier_line():
+    notebook = Notebook(
+        entries=[
+            NotebookEntry(theme="Theme A", summary="A", key_findings=["a"], open_questions=[], tables_touched=["t1"], step_count=1),
+            NotebookEntry(theme="Theme B", summary="B", key_findings=["b"], open_questions=[], tables_touched=["t2"], step_count=3),
+            NotebookEntry(theme="Theme C", summary="C", key_findings=["c"], open_questions=[], tables_touched=["t3"], step_count=2),
+        ],
+        total_steps=6,
+    )
+    text = format_notebook(notebook, max_themes=2)
+    assert "Theme B" in text
+    assert "Theme C" in text
+    assert "Earlier themes: Theme A (1 steps)" in text
+
+
+def test_format_notebook_full_applies_findings_and_questions_caps():
+    notebook = Notebook(
+        entries=[
+            NotebookEntry(
+                theme="Revenue",
+                summary="Trend theme.",
+                key_findings=["old finding", "new finding"],
+                open_questions=["old question", "new question"],
+                tables_touched=["orders"],
+                step_count=2,
+            )
+        ],
+        total_steps=2,
+    )
+    text = format_notebook(
+        notebook,
+        detail="full",
+        max_findings_per_theme=1,
+        max_questions_per_theme=1,
+    )
+    assert "new finding" in text
+    assert "old finding" not in text
+    assert "new question" in text
+    assert "old question" not in text
+
+
 def test_notebook_persistence(store):
     """Notebook round-trips through the store."""
     run_id = store.insert_run({"mode": "test"})
@@ -864,6 +956,7 @@ def _col(
     stddev: float | None = None,
     min_val: str | None = None,
     max_val: str | None = None,
+    sample_values: list[str] | None = None,
 ) -> ColumnProfile:
     return ColumnProfile(
         name=name,
@@ -873,7 +966,7 @@ def _col(
         null_pct=null_pct,
         distinct_count=distinct_count,
         cardinality_ratio=cardinality_ratio,
-        sample_values=[],
+        sample_values=list(sample_values or []),
         min_val=min_val,
         max_val=max_val,
         mean=None,

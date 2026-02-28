@@ -9,8 +9,9 @@ from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel
 
 from nemo.config import NemoConfig
+from nemo.ingest.profile import TableProfile
 from nemo.planner.models import HypothesisRecord
-from nemo.planner.strategist import Hypothesis, Notebook, format_notebook
+from nemo.planner.strategist import Hypothesis, Notebook, build_schema_context, format_notebook
 
 VALIDATION_STEPS = ("reproduce", "segment", "confound", "counter", "quantify")
 
@@ -73,20 +74,30 @@ def validation_step_name(hypothesis: HypothesisRecord) -> str:
 async def plan_validation_step(
     hypothesis: HypothesisRecord,
     notebook: Notebook,
-    schema_context: str,
+    schema_context: str | None,
     config: NemoConfig,
     client: OpenAI,
+    profiles: list[TableProfile] | None = None,
 ) -> Hypothesis:
     """Plan one exploit-phase validation step for a hypothesis under test."""
+    scoped_schema_context = schema_context or ""
+    if profiles is not None:
+        focus_tables = set(hypothesis.tables_involved) if hypothesis.tables_involved else None
+        scoped_schema_context = build_schema_context(
+            profiles,
+            focus_tables=focus_tables,
+            max_samples=5,
+        )
+
     step_name = validation_step_name(hypothesis)
     guidance = STEP_GUIDANCE[step_name]
     evidence_lines = _format_evidence(hypothesis)
     user_content = f"""\
 ## Available Tables
-{schema_context}
+{scoped_schema_context}
 
 ## Investigation Notebook
-{format_notebook(notebook)}
+{format_notebook(notebook, detail="summary")}
 
 ## Hypothesis Under Test
 Hypothesis ID: {hypothesis.hypothesis_id}
