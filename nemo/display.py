@@ -63,6 +63,17 @@ class DisplaySubscriber:
             self.console.print(f"  phase: {phase}")
             if phase == "executing" and event.payload.get("sql"):
                 self.console.print(f"  sql: {event.payload.get('sql')}")
+            if phase == "analyzing":
+                iteration = event.payload.get("iteration")
+                max_iterations = event.payload.get("analyst_max_iterations")
+                if iteration is not None and max_iterations is not None:
+                    self.console.print(
+                        f"  analyst iteration: {iteration}/{max_iterations} "
+                        f"stage={event.payload.get('analyst_stage', 'tooling')}"
+                    )
+                warning = str(event.payload.get("warning") or "")
+                if warning:
+                    self.console.print(f"  [yellow]warning[/yellow] {warning}")
         elif event.type == EventType.STEP_COMPLETED:
             self.stats.steps += 1
             if not self.quiet:

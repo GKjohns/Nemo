@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pandas as pd
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
@@ -173,11 +173,14 @@ async def run_statistical_analysis(
     config: NemoConfig,
     client: OpenAI,
     max_iterations: int | None = None,
+    on_iteration: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> AnalystResult | None:
     """Run a ReAct statistical analysis loop and return structured output."""
     effective_max_rows = max(1, int(getattr(config, "max_analysis_rows", 50_000)))
+    effective_max_memory_mb = max(1, int(getattr(config, "max_analysis_memory_mb", 256)))
     effective_timeout = max(1, int(getattr(config, "analysis_timeout_seconds", 30)))
     iteration_budget = max_iterations or int(getattr(config, "analyst_max_iterations", 8))
+    warning_messages: list[str] = []
 
     session = PythonSession(timeout_seconds=effective_timeout)
     all_sql: list[str] = []
@@ -191,7 +194,7 @@ async def run_statistical_analysis(
         ),
     }]
 
-    for _ in range(iteration_budget):
+    for iteration_num in range(1, iteration_budget + 1):
         response = None
         for attempt in range(3):
             try:
@@ -217,10 +220,29 @@ async def run_statistical_analysis(
 
         tool_calls = [item for item in response.output if item.type == "function_call"]
         if not tool_calls:
+            await _notify_iteration(
+                on_iteration,
+                {
+                    "iteration": iteration_num,
+                    "analyst_max_iterations": iteration_budget,
+                    "analyst_stage": "finalizing",
+                    "analyst_tool_calls": [],
+                },
+            )
             final_text = _extract_text(response)
             return _parse_analyst_result(final_text, all_sql, extraction_sql)
 
+        await _notify_iteration(
+            on_iteration,
+            {
+                "iteration": iteration_num,
+                "analyst_max_iterations": iteration_budget,
+                "analyst_stage": "tooling",
+                "analyst_tool_calls": [str(tc.name) for tc in tool_calls],
+            },
+        )
         for tc in tool_calls:
+            warning_count_before = len(warning_messages)
             result_str = _dispatch_tool(
                 tc.name,
                 json.loads(tc.arguments) if tc.arguments else {},
@@ -229,12 +251,34 @@ async def run_statistical_analysis(
                 session=session,
                 all_sql=all_sql,
                 max_rows=effective_max_rows,
+                max_memory_mb=effective_max_memory_mb,
+                warnings=warning_messages,
             )
+            if len(warning_messages) > warning_count_before:
+                for warning in warning_messages[warning_count_before:]:
+                    await _notify_iteration(
+                        on_iteration,
+                        {
+                            "iteration": iteration_num,
+                            "analyst_max_iterations": iteration_budget,
+                            "analyst_stage": "memory_warning",
+                            "warning": warning,
+                        },
+                    )
             conversation.append(
                 {"type": "function_call", "call_id": tc.call_id, "name": tc.name, "arguments": tc.arguments}
             )
             conversation.append({"type": "function_call_output", "call_id": tc.call_id, "output": result_str})
 
+    await _notify_iteration(
+        on_iteration,
+        {
+            "iteration": iteration_budget,
+            "analyst_max_iterations": iteration_budget,
+            "analyst_stage": "max_iterations_reached",
+            "warning": "Analyst reached max iterations before producing a final structured result.",
+        },
+    )
     return None
 
 
@@ -247,6 +291,9 @@ def _dispatch_tool(
     session: PythonSession,
     all_sql: list[str],
     max_rows: int,
+    max_memory_mb: int = 256,
+    memory_warn_fraction: float = 0.8,
+    warnings: list[str] | None = None,
 ) -> str:
     if name == "describe_table":
         table_name = str(args.get("table", ""))
@@ -265,10 +312,22 @@ def _dispatch_tool(
                 "failed_sql": sql,
             })
         session.session_vars[variable_name] = df
-        return _safe_json_dumps({
+        payload: dict[str, Any] = {
             "variable_name": variable_name,
             **meta,
-        })
+        }
+        if max_memory_mb > 0:
+            threshold_mb = max_memory_mb * memory_warn_fraction
+            memory_mb = float(meta.get("memory_mb") or 0.0)
+            if memory_mb >= threshold_mb:
+                warning = (
+                    f"Extracted DataFrame uses {memory_mb:.2f}MB, which exceeds "
+                    f"{memory_warn_fraction:.0%} of max_analysis_memory_mb ({max_memory_mb}MB)."
+                )
+                payload["warning"] = warning
+                if warnings is not None:
+                    warnings.append(warning)
+        return _safe_json_dumps(payload)
 
     if name == "run_python":
         code = str(args.get("code", ""))
@@ -458,6 +517,17 @@ def _to_float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+async def _notify_iteration(
+    callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+    payload: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    maybe_awaitable = callback(payload)
+    if asyncio.iscoroutine(maybe_awaitable):
+        await maybe_awaitable
 
 
 def _quote_ident(identifier: str) -> str:

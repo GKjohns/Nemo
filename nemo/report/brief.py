@@ -152,7 +152,7 @@ def generate_brief_markdown(store: NemoStore, top_n: int = 10) -> str:
     """Build a markdown summary for recent run outcomes."""
     insights = store.execute(
         """
-        SELECT insight_id, title, claim, confidence, source_tables_json, created_at
+        SELECT insight_id, title, claim, confidence, source_tables_json, created_at, result_sample_json
         FROM insights
         WHERE status = 'ok'
         ORDER BY confidence DESC, created_at DESC
@@ -206,8 +206,10 @@ def generate_brief_markdown(store: NemoStore, top_n: int = 10) -> str:
             claim = str(row[2] or "")
             confidence = float(row[3] or 0.0)
             source_tables = ", ".join(_json_list(row[4])) or "unknown"
+            stat_suffix = _format_statistical_suffix(row[6])
             lines.append(
-                f"- `{insight_id}` **{title}** (confidence {confidence:.2f}, tables: {source_tables}) - {claim}"
+                f"- `{insight_id}` **{title}** (confidence {confidence:.2f}, tables: {source_tables}) - "
+                f"{claim}{stat_suffix}"
             )
     lines.append("")
 
@@ -324,6 +326,34 @@ def _hypothesis_summary(store: NemoStore, run_id: str | None) -> dict[str, Any]:
         )
     parsed_rows.sort(key=lambda item: (item["status"], -item["confidence"], item["hypothesis_id"]))
     return {"rows": parsed_rows, "status_counts": status_counts}
+
+
+def _format_statistical_suffix(raw_result_sample: Any) -> str:
+    rows = _parse_json_rows(raw_result_sample)
+    if not rows:
+        return ""
+    first = rows[0]
+    test = str(first.get("test") or "").strip()
+    if not test:
+        return ""
+    p_value = first.get("p_value")
+    effect = first.get("effect_size")
+    p_display = f"{float(p_value):.4g}" if isinstance(p_value, (float, int)) else "n/a"
+    effect_display = f"{float(effect):.3f}" if isinstance(effect, (float, int)) else "n/a"
+    return f" _(stats: {test}, p={p_display}, effect={effect_display})_"
+
+
+def _parse_json_rows(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    return []
 
 
 def _json_list(raw: Any) -> list[str]:

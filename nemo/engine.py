@@ -805,6 +805,34 @@ class NemoEngine:
     ) -> tuple[Hypothesis, Any, int, bool]:
         analysis_type = str(hypothesis.analysis_type or "sql").strip().lower()
         if analysis_type == "statistical":
+            if not bool(getattr(self.config, "enable_statistical_analysis", True)):
+                await self._emit_step_phase(
+                    run_id,
+                    step_num,
+                    "executing",
+                    sql=hypothesis.sql,
+                    analysis_type="sql",
+                    fallback_from="statistical",
+                    fallback_reason="statistical analysis disabled by configuration",
+                )
+                disabled_result = execute_query(self.store, hypothesis.sql, self.config)
+                if not disabled_result.error:
+                    return hypothesis, disabled_result, 0, False
+                self.store.insert_learning(
+                    run_id=run_id,
+                    category="error_pattern",
+                    subject=f"STRATEGIST:{hypothesis.table}",
+                    detail=disabled_result.error,
+                    confidence=0.7,
+                )
+                await self._emit_step_error(
+                    run_id,
+                    step_num,
+                    "executing",
+                    disabled_result.error,
+                    will_retry=False,
+                )
+                return hypothesis, disabled_result, 1, True
             await self._emit_step_phase(
                 run_id,
                 step_num,
@@ -812,34 +840,43 @@ class NemoEngine:
                 sql=hypothesis.sql,
                 analysis_type="statistical",
             )
-            result, error = await self._execute_statistical_analysis(hypothesis, profiles)
+            result, error = await self._execute_statistical_analysis(
+                run_id=run_id,
+                step_num=step_num,
+                hypothesis=hypothesis,
+                profiles=profiles,
+            )
             if result is not None and error is None:
                 return hypothesis, result, 0, False
 
-            error_message = error or "Statistical analysis failed"
+            await self._emit_step_phase(
+                run_id,
+                step_num,
+                "executing",
+                sql=hypothesis.sql,
+                analysis_type="sql",
+                fallback_from="statistical",
+                fallback_reason=error or "statistical analysis failed",
+            )
+            fallback_result = execute_query(self.store, hypothesis.sql, self.config)
+            if not fallback_result.error:
+                return hypothesis, fallback_result, 0, False
+
             self.store.insert_learning(
                 run_id=run_id,
                 category="error_pattern",
                 subject=f"STRATEGIST:{hypothesis.table}",
-                detail=error_message,
+                detail=fallback_result.error,
                 confidence=0.7,
             )
             await self._emit_step_error(
                 run_id,
                 step_num,
-                "analyzing",
-                error_message,
+                "executing",
+                fallback_result.error,
                 will_retry=False,
             )
-            return hypothesis, ExecutionResult(
-                sql=hypothesis.sql,
-                rows=[],
-                row_count=0,
-                column_names=[],
-                truncated=False,
-                cost_ms=0,
-                error=error_message,
-            ), 1, True
+            return hypothesis, fallback_result, 1, True
 
         await self._emit_step_phase(run_id, step_num, "executing", sql=hypothesis.sql, analysis_type="sql")
         result = execute_query(self.store, hypothesis.sql, self.config)
@@ -872,6 +909,9 @@ class NemoEngine:
 
     async def _execute_statistical_analysis(
         self,
+        *,
+        run_id: str,
+        step_num: int,
         hypothesis: Hypothesis,
         profiles: list,
     ) -> tuple[ExecutionResult | None, str | None]:
@@ -887,6 +927,13 @@ class NemoEngine:
                 store=self.store,
                 config=self.config,
                 client=self._llm_client,
+                on_iteration=lambda payload: self._emit_step_phase(
+                    run_id,
+                    step_num,
+                    "analyzing",
+                    analysis_type="statistical",
+                    **payload,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             return None, str(exc)

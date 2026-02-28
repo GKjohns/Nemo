@@ -125,7 +125,11 @@ def test_engine_routes_statistical_hypothesis_to_analyst(store, monkeypatch):
 
     called: dict[str, bool] = {"analyst": False}
 
-    async def _fake_execute_statistical_analysis(_hypothesis, _profiles):
+    async def _fake_execute_statistical_analysis(*, run_id, step_num, hypothesis, profiles):
+        assert run_id == "run_test"
+        assert step_num == 1
+        assert hypothesis.analysis_type == "statistical"
+        assert isinstance(profiles, list)
         called["analyst"] = True
         return (
             ExecutionResult(
@@ -160,5 +164,51 @@ def test_engine_routes_statistical_hypothesis_to_analyst(store, monkeypatch):
     assert called["analyst"] is True
     assert result_hypothesis.analysis_type == "statistical"
     assert result.error is None
+    assert errors == 0
+    assert should_skip is False
+
+
+def test_engine_falls_back_to_sql_when_statistical_analysis_fails(store, monkeypatch):
+    engine = NemoEngine(store, NemoConfig(), EventBus())
+    hypothesis = Hypothesis(
+        question="Is segment A higher than B?",
+        reasoning="Requires statistical inference.",
+        sql="SELECT 1 AS value",
+        table="orders",
+        analysis_type="statistical",
+    )
+
+    async def _fake_execute_statistical_analysis(*, run_id, step_num, hypothesis, profiles):
+        _ = (run_id, step_num, hypothesis, profiles)
+        return None, "synthetic analyst failure"
+
+    def _fake_execute_query(_store, sql, _config):
+        return ExecutionResult(
+            sql=sql,
+            rows=[{"value": 1}],
+            row_count=1,
+            column_names=["value"],
+            truncated=False,
+            cost_ms=3,
+            error=None,
+        )
+
+    monkeypatch.setattr(engine, "_execute_statistical_analysis", _fake_execute_statistical_analysis)
+    monkeypatch.setattr("nemo.engine.execute_query", _fake_execute_query)
+
+    result_hypothesis, result, errors, should_skip = asyncio.run(
+        engine._execute_strategist_step(
+            run_id="run_test",
+            step_num=1,
+            hypothesis=hypothesis,
+            notebook=Notebook(),
+            schema_ctx="",
+            profiles=[],
+        )
+    )
+
+    assert result_hypothesis.analysis_type == "statistical"
+    assert result.error is None
+    assert result.row_count == 1
     assert errors == 0
     assert should_skip is False

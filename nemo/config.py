@@ -49,6 +49,8 @@ class NemoConfig:
     max_analysis_rows: int = 50000
     analysis_timeout_seconds: int = 30
     analyst_max_iterations: int = 8
+    enable_statistical_analysis: bool = True
+    max_analysis_memory_mb: int = 256
 
     # User-defined hints
     goal: str = ""
@@ -120,6 +122,12 @@ class NemoConfig:
         config.analyst_max_iterations = int(
             analysis.get("analyst_max_iterations", config.analyst_max_iterations)
         )
+        config.enable_statistical_analysis = bool(
+            analysis.get("enable_statistical_analysis", config.enable_statistical_analysis)
+        )
+        config.max_analysis_memory_mb = int(
+            analysis.get("max_analysis_memory_mb", config.max_analysis_memory_mb)
+        )
 
         hints = raw.get("hints", {})
         config.goal = str(hints.get("goal", config.goal))
@@ -188,6 +196,8 @@ def write_default_config(path: Path) -> None:
             "max_analysis_rows": defaults.max_analysis_rows,
             "analysis_timeout_seconds": defaults.analysis_timeout_seconds,
             "analyst_max_iterations": defaults.analyst_max_iterations,
+            "enable_statistical_analysis": defaults.enable_statistical_analysis,
+            "max_analysis_memory_mb": defaults.max_analysis_memory_mb,
         },
         "hints": {
             "time_columns": [],

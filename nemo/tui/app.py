@@ -527,14 +527,24 @@ class _LiveEventSubscriber:
             if sql:
                 self._current_sql = sql
             step_label = f"Step {event.step_num}/{self.budget}"
-            phase_label = {
+            phase_label_map = {
                 "compiling": "Writing query",
                 "executing": "Running query",
                 "summarizing": "Interpreting results",
                 "interpreting": "Interpreting results",
                 "linking": "Connecting to evidence graph",
                 "agent-exploring": "Agent exploring",
-            }.get(phase, phase)
+                "analyzing": "Running statistical analysis",
+            }
+            phase_label = phase_label_map.get(phase, phase)
+            if phase == "analyzing":
+                iteration = event.payload.get("iteration")
+                max_iterations = event.payload.get("analyst_max_iterations")
+                if iteration is not None and max_iterations is not None:
+                    phase_label = f"Running statistical analysis ({iteration}/{max_iterations})"
+                warning = str(event.payload.get("warning") or "")
+                if warning:
+                    console.print(f"    [yellow]⚠[/yellow] {warning}")
             self._update_spinner(
                 f"[cyan]{step_label} — {phase_label}...[/cyan]"
             )
@@ -565,6 +575,20 @@ class _LiveEventSubscriber:
                 _human_duration(duration),
             ]
             console.print(f"    [dim]{' · '.join(stats_parts)}[/dim]")
+            if str(payload.get("analysis_type") or "").lower() == "statistical":
+                for row in (payload.get("result_preview") or [])[:2]:
+                    if not isinstance(row, dict):
+                        continue
+                    test = str(row.get("test") or "").strip()
+                    if not test:
+                        continue
+                    p_value = row.get("p_value")
+                    effect = row.get("effect_size")
+                    p_display = f"{float(p_value):.4g}" if isinstance(p_value, (float, int)) else "n/a"
+                    effect_display = f"{float(effect):.3f}" if isinstance(effect, (float, int)) else "n/a"
+                    console.print(
+                        f"    [dim]stat[/dim] {test} · p={p_display} · effect={effect_display}"
+                    )
 
         elif event.type == EventType.STEP_ERROR:
             self.errors += 1

@@ -73,3 +73,26 @@ def test_write_brief_report_writes_markdown_file(store, tmp_path: Path):
     assert output.exists()
     content = output.read_text(encoding="utf-8")
     assert content.startswith("# Nemo Brief")
+
+
+def test_generate_brief_formats_statistical_metadata(store):
+    run_id = store.insert_run(config_json={"max_steps": 2}, status="completed")
+    store.insert_insight(
+        title="Segment difference",
+        question="Q",
+        sql="SELECT 1",
+        result_summary_json={"ok": True},
+        claim="A and B differ.",
+        confidence=0.8,
+        run_id=run_id,
+        source_tables_json=["orders"],
+        result_sample_json=[
+            {
+                "test": "ttest_ind",
+                "p_value": 0.0042,
+                "effect_size": 0.61,
+            }
+        ],
+    )
+    markdown = generate_brief_markdown(store, top_n=5)
+    assert "stats: ttest_ind, p=0.0042, effect=0.610" in markdown

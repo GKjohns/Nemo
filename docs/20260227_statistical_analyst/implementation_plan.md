@@ -772,7 +772,9 @@ print('Phase 4 e2e smoke test PASSED')
 
 ---
 
-### Phase 5: Polish
+### Phase 5: Polish [✅ Completed]
+
+**Status:** Completed on 2026-02-28 (unit tests + full fast suite passing; smoke test passing on local TPC-H flow)
 
 **Work:**
 - TUI output for statistical analysis steps (show test name, p-value, effect size in console)

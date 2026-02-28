@@ -170,3 +170,24 @@ def test_dispatch_unknown_tool_returns_clean_error(store) -> None:
     parsed = json.loads(payload)
     assert "error" in parsed
     assert "unknown tool" in parsed["error"]
+
+
+def test_extract_dataframe_emits_memory_warning_near_limit(store) -> None:
+    store.execute("CREATE TABLE memory_demo AS SELECT repeat('abcdefghij', 200) AS txt FROM range(6000)")
+    session = PythonSession()
+    warnings: list[str] = []
+    payload = _dispatch_tool(
+        "extract_dataframe",
+        {"sql": "SELECT txt FROM memory_demo", "variable_name": "df"},
+        store=store,
+        profiles=[],
+        session=session,
+        all_sql=[],
+        max_rows=6000,
+        max_memory_mb=1,
+        warnings=warnings,
+    )
+    parsed = json.loads(payload)
+    assert "warning" in parsed
+    assert "max_analysis_memory_mb" in parsed["warning"]
+    assert warnings
