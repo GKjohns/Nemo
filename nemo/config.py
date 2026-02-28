@@ -49,6 +49,7 @@ class NemoConfig:
     max_consecutive_exploit: int = 6
     min_explore_ratio: float = 0.35
     hypothesis_priority_decay: float = 0.15
+    validation_budget_fraction: float = 0.15
     max_display_rows: int = 15
     max_analysis_rows: int = 50000
     analysis_timeout_seconds: int = 30
@@ -126,6 +127,9 @@ class NemoConfig:
         )
         config.hypothesis_priority_decay = float(
             exploration.get("hypothesis_priority_decay", config.hypothesis_priority_decay)
+        )
+        config.validation_budget_fraction = float(
+            exploration.get("validation_budget_fraction", config.validation_budget_fraction)
         )
 
         analysis = raw.get("analysis", {})
@@ -209,6 +213,7 @@ def write_default_config(path: Path) -> None:
             "max_consecutive_exploit": defaults.max_consecutive_exploit,
             "min_explore_ratio": defaults.min_explore_ratio,
             "hypothesis_priority_decay": defaults.hypothesis_priority_decay,
+            "validation_budget_fraction": defaults.validation_budget_fraction,
         },
         "analysis": {
             "max_analysis_rows": defaults.max_analysis_rows,

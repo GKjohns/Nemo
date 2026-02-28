@@ -28,7 +28,9 @@ from nemo.planner.arbiter import (
     _count_consecutive_exploits,
     _explore_ratio,
     _format_hypotheses,
+    _has_diminishing_returns,
     decide_phase,
+    effective_max_validation_steps,
     should_consult_arbiter,
 )
 from nemo.planner.models import (
@@ -1378,3 +1380,237 @@ def test_validation_hypothesis_gets_reduced_priority():
     reduced = max(0.0, raw_confidence - 0.2)
     assert abs(reduced - 0.65) < 1e-9
     assert reduced < raw_confidence
+
+
+# ---------------------------------------------------------------------------
+# Budget-proportional validation depth tests
+# ---------------------------------------------------------------------------
+
+
+def test_effective_max_validation_steps_scales_with_budget():
+    """Short runs get tighter validation caps; long runs use the configured max."""
+    config = NemoConfig(max_validation_steps=5, validation_budget_fraction=0.15)
+    assert effective_max_validation_steps(config, budget=10) == 2
+    assert effective_max_validation_steps(config, budget=20) == 3
+    assert effective_max_validation_steps(config, budget=34) == 5
+    assert effective_max_validation_steps(config, budget=100) == 5
+    assert effective_max_validation_steps(config, budget=200) == 5
+
+
+def test_effective_max_validation_steps_respects_configured_max():
+    """Budget-scaled value never exceeds the configured max."""
+    config = NemoConfig(max_validation_steps=3, validation_budget_fraction=0.5)
+    assert effective_max_validation_steps(config, budget=100) == 3
+
+
+def test_effective_max_validation_steps_floor_of_two():
+    """Even on tiny budgets, at least 2 validation steps are allowed."""
+    config = NemoConfig(max_validation_steps=5, validation_budget_fraction=0.15)
+    assert effective_max_validation_steps(config, budget=1) == 2
+    assert effective_max_validation_steps(config, budget=5) == 2
+
+
+def test_has_diminishing_returns_empty_chain():
+    """No evidence chain means no diminishing returns."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_1",
+        claim="Some claim",
+        source_insight_id="ins_1",
+        initial_confidence=0.8,
+        status="testing",
+    )
+    assert not _has_diminishing_returns(h)
+
+
+def test_has_diminishing_returns_short_chain():
+    """A single evidence item is not enough to trigger diminishing returns."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_1",
+        claim="Some claim",
+        source_insight_id="ins_1",
+        initial_confidence=0.8,
+        status="testing",
+        validation_step=1,
+    )
+    h.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="confounds", note="Confounded."),
+    ]
+    assert not _has_diminishing_returns(h)
+
+
+def test_has_diminishing_returns_two_confounds():
+    """Two consecutive confounds/narrows triggers diminishing returns."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_1",
+        claim="Some claim",
+        source_insight_id="ins_1",
+        initial_confidence=0.8,
+        status="testing",
+        validation_step=3,
+    )
+    h.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="supports", note="Good."),
+        EvidenceLink(insight_id="i2", relationship="confounds", note="Confounded."),
+        EvidenceLink(insight_id="i3", relationship="narrows", note="Only a subset."),
+    ]
+    assert _has_diminishing_returns(h)
+
+
+def test_has_diminishing_returns_mixed_recent_evidence():
+    """One confound and one support in the last two items is not diminishing."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_1",
+        claim="Some claim",
+        source_insight_id="ins_1",
+        initial_confidence=0.8,
+        status="testing",
+        validation_step=2,
+    )
+    h.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="confounds", note="Confounded."),
+        EvidenceLink(insight_id="i2", relationship="supports", note="Holds up."),
+    ]
+    assert not _has_diminishing_returns(h)
+
+
+def test_arbiter_does_not_auto_continue_with_diminishing_returns():
+    """When a testing hypothesis has diminishing returns, the arbiter should not
+    auto-continue — it should fall through to broader decision logic."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_struggling",
+        claim="DOE per-day pool drives extreme OT",
+        source_insight_id="insight_1",
+        initial_confidence=0.75,
+        status="testing",
+        validation_step=2,
+        priority=0.75,
+    )
+    h.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="confounds", note="Unit-rate mismatch."),
+        EvidenceLink(insight_id="i2", relationship="narrows", note="Only a small subgroup."),
+    ]
+    # No proposed hypotheses and only a struggling testing hypothesis:
+    # the system should explore for new leads rather than auto-continue.
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=[h],
+            all_tables=["payroll"],
+            steps_done=8,
+            budget=20,
+            recent_phases=[PhaseDecision(phase="exploit", reasoning="validating")],
+            config=NemoConfig(max_validation_steps=5),
+            client=None,
+        )
+    )
+    assert decision.phase == "explore"
+    assert "Continuing active validation" not in decision.reasoning
+
+
+def test_arbiter_switches_to_better_hypothesis_with_diminishing_returns():
+    """When one hypothesis is struggling but a high-priority proposed hypothesis
+    exists, the arbiter should pick the proposed one instead."""
+    struggling = HypothesisRecord(
+        hypothesis_id="hyp_struggling",
+        claim="DOE per-day pool drives extreme OT",
+        source_insight_id="insight_1",
+        initial_confidence=0.75,
+        status="testing",
+        validation_step=2,
+        priority=0.75,
+    )
+    struggling.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="confounds", note="Unit-rate mismatch."),
+        EvidenceLink(insight_id="i2", relationship="narrows", note="Only a subset."),
+    ]
+    waiting = HypothesisRecord(
+        hypothesis_id="hyp_waiting",
+        claim="Ghost employees with NULL payroll numbers",
+        source_insight_id="insight_2",
+        initial_confidence=0.85,
+        status="proposed",
+        priority=0.85,
+    )
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=[struggling, waiting],
+            all_tables=["payroll"],
+            steps_done=8,
+            budget=20,
+            recent_phases=[PhaseDecision(phase="exploit", reasoning="validating")],
+            config=NemoConfig(max_validation_steps=5),
+            client=None,
+        )
+    )
+    # Should pick the waiting hypothesis, not auto-continue the struggling one
+    assert decision.phase == "exploit"
+    assert decision.hypothesis_id == "hyp_waiting"
+    assert "Continuing active validation" not in decision.reasoning
+
+
+def test_arbiter_auto_continues_healthy_validation():
+    """When evidence is healthy, mid-validation auto-continue still works."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_healthy",
+        claim="Salary anomaly in Fire Dept",
+        source_insight_id="insight_1",
+        initial_confidence=0.85,
+        status="testing",
+        validation_step=1,
+        priority=0.85,
+    )
+    h.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="supports", note="Signal reproduces."),
+    ]
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=[h],
+            all_tables=["payroll"],
+            steps_done=4,
+            budget=20,
+            recent_phases=[],
+            config=NemoConfig(max_validation_steps=5),
+            client=None,
+        )
+    )
+    assert decision.phase == "exploit"
+    assert decision.hypothesis_id == "hyp_healthy"
+    assert "Continuing active validation" in decision.reasoning
+
+
+def test_arbiter_respects_budget_scaled_max_for_auto_continue():
+    """On a short-budget run, the effective max is lower and validation
+    should not auto-continue past it."""
+    h = HypothesisRecord(
+        hypothesis_id="hyp_at_limit",
+        claim="Some claim",
+        source_insight_id="insight_1",
+        initial_confidence=0.8,
+        status="testing",
+        validation_step=3,
+        priority=0.8,
+    )
+    h.evidence_chain = [
+        EvidenceLink(insight_id="i1", relationship="supports", note="Good."),
+        EvidenceLink(insight_id="i2", relationship="supports", note="Good."),
+        EvidenceLink(insight_id="i3", relationship="supports", note="Good."),
+    ]
+    # Budget=20, fraction=0.15 → effective_max = min(5, ceil(3)) = 3
+    # validation_step=3 is NOT < 3, so auto-continue should NOT trigger.
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=[h],
+            all_tables=["orders"],
+            steps_done=8,
+            budget=20,
+            recent_phases=[],
+            config=NemoConfig(max_validation_steps=5, validation_budget_fraction=0.15),
+            client=None,
+        )
+    )
+    # It should still choose exploit via the fallback path, but the key assertion
+    # is that the reasoning does NOT say "Continuing active validation"
+    assert "Continuing active validation" not in decision.reasoning

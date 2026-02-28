@@ -415,13 +415,9 @@ def _extract_dataframe(sql: str, store: NemoStore, max_rows: int) -> tuple[pd.Da
 
 
 def _apply_row_cap(sql: str, max_rows: int) -> str:
-    if _has_limit(sql):
-        return f"SELECT * FROM ({sql}) AS _sub LIMIT {int(max_rows)}"
+    # Always wrap with an outer LIMIT so extraction stays memory-safe,
+    # regardless of whether the inner query already includes one.
     return f"SELECT * FROM ({sql}) AS _sub LIMIT {int(max_rows)}"
-
-
-def _has_limit(sql: str) -> bool:
-    return re.search(r"\blimit\s+\d+\b", sql, flags=re.IGNORECASE) is not None
 
 
 def _validate_select_only(sql: str) -> None:

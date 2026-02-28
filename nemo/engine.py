@@ -37,7 +37,7 @@ from nemo.planner import (
     select_next,
     should_render_verdict,
 )
-from nemo.planner.arbiter import decide_phase, should_consult_arbiter
+from nemo.planner.arbiter import decide_phase, effective_max_validation_steps, should_consult_arbiter
 from nemo.planner.models import (
     DuplicateCheck,
     EvidenceLink,
@@ -45,7 +45,7 @@ from nemo.planner.models import (
     HypothesisRecord,
     PhaseDecision,
 )
-from nemo.planner.strategist import (
+from nemo.planner.analyst import (
     Hypothesis,
     InterpretationResult,
     Notebook,
@@ -557,7 +557,7 @@ class NemoEngine:
 
                 if should_render_verdict(
                     validation_target,
-                    max_validation_steps=int(self.config.max_validation_steps),
+                    max_validation_steps=effective_max_validation_steps(self.config, step_budget),
                     latest_relationship=relationship,
                 ):
                     verdict_status, verdict_confidence, verdict_text = await render_verdict(
@@ -808,7 +808,6 @@ class NemoEngine:
         step_num: int,
         hypothesis: Hypothesis,
         notebook: Notebook,
-        schema_ctx: str | None = None,
         profiles: list,
     ) -> tuple[Hypothesis, Any, int, bool]:
         analysis_type = str(hypothesis.analysis_type or "sql").strip().lower()
@@ -826,20 +825,7 @@ class NemoEngine:
                 disabled_result = execute_query(self.store, hypothesis.sql, self.config)
                 if not disabled_result.error:
                     return hypothesis, disabled_result, 0, False
-                self.store.insert_learning(
-                    run_id=run_id,
-                    category="error_pattern",
-                    subject=f"STRATEGIST:{hypothesis.table}",
-                    detail=disabled_result.error,
-                    confidence=0.7,
-                )
-                await self._emit_step_error(
-                    run_id,
-                    step_num,
-                    "executing",
-                    disabled_result.error,
-                    will_retry=False,
-                )
+                await self._record_execution_error(run_id, step_num, hypothesis, disabled_result.error)
                 return hypothesis, disabled_result, 1, True
             await self._emit_step_phase(
                 run_id,
@@ -870,20 +856,7 @@ class NemoEngine:
             if not fallback_result.error:
                 return hypothesis, fallback_result, 0, False
 
-            self.store.insert_learning(
-                run_id=run_id,
-                category="error_pattern",
-                subject=f"STRATEGIST:{hypothesis.table}",
-                detail=fallback_result.error,
-                confidence=0.7,
-            )
-            await self._emit_step_error(
-                run_id,
-                step_num,
-                "executing",
-                fallback_result.error,
-                will_retry=False,
-            )
+            await self._record_execution_error(run_id, step_num, hypothesis, fallback_result.error)
             return hypothesis, fallback_result, 1, True
 
         await self._emit_step_phase(run_id, step_num, "executing", sql=hypothesis.sql, analysis_type="sql")
@@ -906,15 +879,24 @@ class NemoEngine:
         if not result.error:
             return hypothesis, result, 0, False
 
+        await self._record_execution_error(run_id, step_num, hypothesis, result.error)
+        return hypothesis, result, 1, True
+
+    async def _record_execution_error(
+        self,
+        run_id: str,
+        step_num: int,
+        hypothesis: Hypothesis,
+        error: str,
+    ) -> None:
         self.store.insert_learning(
             run_id=run_id,
             category="error_pattern",
             subject=f"STRATEGIST:{hypothesis.table}",
-            detail=result.error,
+            detail=error,
             confidence=0.7,
         )
-        await self._emit_step_error(run_id, step_num, "executing", result.error, will_retry=False)
-        return hypothesis, result, 1, True
+        await self._emit_step_error(run_id, step_num, "executing", error, will_retry=False)
 
     async def _execute_statistical_analysis(
         self,
@@ -1564,7 +1546,8 @@ async def is_semantically_duplicate(
         )
         for attempt in range(3):
             try:
-                response = client.responses.parse(
+                response = await asyncio.to_thread(
+                    client.responses.parse,
                     model="gpt-5-nano",
                     instructions=instructions,
                     input=json.dumps(payload),

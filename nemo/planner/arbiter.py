@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
@@ -39,6 +40,14 @@ IMPORTANT decision guidelines:
 - If choosing EXPLOIT, pick the highest-priority hypothesis for this moment.
 - If the user has provided an investigation goal, weight hypotheses that
   serve that goal more heavily.
+- Watch for diminishing returns: if a hypothesis under validation keeps
+  producing 'confounds' or 'narrows' evidence without clear supporting
+  results, consider switching to EXPLORE for more impactful leads rather
+  than continuing to invest in a struggling hypothesis.
+- Be budget-conscious with validation depth: a single hypothesis consuming
+  a large share of the total step budget should have strong supporting
+  evidence to justify continued investment. When untested high-priority
+  hypotheses are waiting, they represent opportunity cost.
 Return a structured decision with clear reasoning."""
 
 
@@ -79,11 +88,39 @@ def _count_consecutive_exploits(recent_phases: list[PhaseDecision]) -> int:
 
 
 def _explore_ratio(recent_phases: list[PhaseDecision]) -> float:
-    """Fraction of recent decisions that were EXPLORE (0.0 if no history)."""
+    """Fraction of recent decisions that were EXPLORE (1.0 if no history)."""
     if not recent_phases:
         return 1.0
     explores = sum(1 for d in recent_phases if d.phase == "explore")
     return explores / len(recent_phases)
+
+
+def effective_max_validation_steps(config: NemoConfig, budget: int) -> int:
+    """Scale max validation depth with total step budget.
+
+    On short runs, each validation step is a larger fraction of the total
+    budget so we tighten the cap.  On long runs the configured maximum
+    applies unchanged.
+    """
+    configured_max = int(config.max_validation_steps)
+    fraction = float(getattr(config, "validation_budget_fraction", 0.15))
+    budget_scaled = max(2, math.ceil(budget * fraction))
+    return min(configured_max, budget_scaled)
+
+
+def _has_diminishing_returns(hypothesis: HypothesisRecord) -> bool:
+    """Check if recent validation evidence suggests diminishing returns.
+
+    Returns True when the last two evidence items are both confounding or
+    narrowing — a signal that further validation on this hypothesis is
+    unlikely to produce clean supporting evidence.
+    """
+    chain = hypothesis.evidence_chain
+    if len(chain) < 2:
+        return False
+    recent = chain[-2:]
+    weak = sum(1 for e in recent if e.relationship in ("confounds", "narrows"))
+    return weak >= 2
 
 
 def _recently_validated_themes(hypotheses: list[HypothesisRecord]) -> set[str]:
@@ -147,15 +184,19 @@ async def decide_phase(
 
     if testing:
         active = max(testing, key=lambda h: h.updated_at)
-        if int(active.validation_step) < int(config.max_validation_steps):
-            return PhaseDecision(
-                phase="exploit",
-                hypothesis_id=active.hypothesis_id,
-                reasoning=(
-                    f"Continuing active validation for hypothesis {active.hypothesis_id} "
-                    f"(step {active.validation_step}/{config.max_validation_steps})."
-                ),
-            )
+        eff_max = effective_max_validation_steps(config, budget)
+        if int(active.validation_step) < eff_max:
+            if not _has_diminishing_returns(active):
+                return PhaseDecision(
+                    phase="exploit",
+                    hypothesis_id=active.hypothesis_id,
+                    reasoning=(
+                        f"Continuing active validation for hypothesis {active.hypothesis_id} "
+                        f"(step {active.validation_step}/{eff_max})."
+                    ),
+                )
+            # Evidence is mostly confounding/narrowing — fall through to the
+            # LLM arbiter (or subsequent guardrails) rather than auto-continuing.
 
     if (budget - steps_done) <= 2 and proposed:
         best = _best_hypothesis_with_diversity(proposed, hypotheses, config)
@@ -245,6 +286,52 @@ def _best_hypothesis_with_diversity(
     return max(candidates, key=_effective_priority)
 
 
+def _format_hypothesis_health(
+    hypotheses: list[HypothesisRecord],
+    budget: int,
+    steps_done: int,
+) -> str:
+    """Summarize per-hypothesis budget consumption and evidence quality."""
+    testing = [h for h in hypotheses if h.status == "testing"]
+    proposed = [h for h in hypotheses if h.status == "proposed"]
+
+    if not testing and not proposed:
+        return "(no active hypotheses)"
+
+    lines: list[str] = []
+    for h in testing:
+        budget_pct = (h.validation_step / max(1, budget)) * 100
+        supports = sum(1 for e in h.evidence_chain if e.relationship == "supports")
+        contradicts = sum(1 for e in h.evidence_chain if e.relationship == "contradicts")
+        weak = sum(1 for e in h.evidence_chain if e.relationship in ("confounds", "narrows"))
+
+        if weak >= 2:
+            health = "struggling — recent evidence mostly confounding/narrowing"
+        elif contradicts >= supports and h.validation_step >= 2:
+            health = "uncertain — contradictions match or exceed supporting evidence"
+        else:
+            health = "on track"
+
+        lines.append(
+            f"- {h.hypothesis_id} [testing]: {h.validation_step} validation steps "
+            f"({budget_pct:.0f}% of budget), evidence: {supports} supports, "
+            f"{contradicts} contradicts, {weak} confounds/narrows — {health}"
+        )
+
+    untested_high = sorted(
+        [h for h in proposed if float(h.priority) >= 0.6],
+        key=lambda h: float(h.priority),
+        reverse=True,
+    )
+    if untested_high:
+        lines.append(
+            f"- {len(untested_high)} untested hypothesis(es) with priority ≥ 0.6 waiting "
+            f"(top: {untested_high[0].hypothesis_id}, p={untested_high[0].priority:.2f})"
+        )
+
+    return "\n".join(lines) if lines else "(no active hypotheses)"
+
+
 def _build_arbiter_context(
     *,
     notebook: Notebook,
@@ -281,12 +368,19 @@ def _build_arbiter_context(
             f"Tables not yet explored: {', '.join(untouched) if untouched else '(none)'}"
         )
 
+    health_section = _format_hypothesis_health(hypotheses, budget, steps_done)
+    eff_max = effective_max_validation_steps(config, budget) if config else int(budget * 0.15) or 2
+
     return f"""\
 ## Investigation Notebook
 {format_notebook(notebook, detail="summary")}
 
 ## Hypothesis Backlog
 {formatted_hypotheses}
+
+## Hypothesis Health (budget-aware)
+{health_section}
+Effective max validation steps this run: {eff_max} (budget={budget})
 
 ## Coverage
 {coverage_section}
@@ -307,6 +401,10 @@ Decide whether the next step should be:
 If multiple hypotheses are ready for testing (especially with confidence ≥0.7),
 you should switch to EXPLOIT. Gathering more exploratory data when you already
 have strong untested hypotheses wastes budget.
+
+If a hypothesis under validation is "struggling" or "uncertain", consider
+switching to EXPLORE or picking a different hypothesis rather than continuing
+to invest steps in a lead with diminishing returns.
 
 If EXPLOIT, set hypothesis_id to the highest-priority hypothesis to test now.
 """
