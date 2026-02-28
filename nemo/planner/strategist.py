@@ -427,7 +427,15 @@ async def interpret_and_update(
             sql=hypothesis.sql,
         )
     else:
-        rows_preview = _format_rows(result.rows[:20], result.column_names)
+        max_display_rows = max(1, int(getattr(config, "max_display_rows", 15)))
+        if hypothesis.analysis_type == "statistical":
+            max_display_rows = min(max_display_rows, 5)
+        rows_preview = _format_rows(
+            result.rows,
+            result.column_names,
+            max_rows=max_display_rows,
+            max_columns=10,
+        )
         user_content = INTERPRETER_USER.format(
             schema=scoped_schema_context,
             notebook=format_notebook(notebook, detail="full"),
@@ -556,16 +564,37 @@ def _fuzzy_resolve_questions(
     return remaining
 
 
-def _format_rows(rows: list[dict[str, Any]], columns: list[str]) -> str:
-    """Format result rows as a compact text table for LLM context."""
+def _format_rows(
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    *,
+    max_rows: int = 20,
+    max_columns: int = 10,
+) -> str:
+    """Format result rows as a compact markdown table for LLM context."""
     if not rows:
         return "(no rows)"
-    lines: list[str] = []
-    for row in rows[:20]:
-        parts = [f"{col}={_fmt_val(row.get(col))}" for col in columns]
-        lines.append("  " + ", ".join(parts))
-    if len(rows) > 20:
-        lines.append(f"  ... ({len(rows)} rows total)")
+    row_limit = max(1, int(max_rows))
+    col_limit = max(1, int(max_columns))
+    visible_columns = columns[:col_limit]
+    hidden_columns = columns[col_limit:]
+
+    header = "| " + " | ".join(visible_columns) + " |"
+    separator = "| " + " | ".join(["---"] * len(visible_columns)) + " |"
+    lines: list[str] = [header, separator]
+    for row in rows[:row_limit]:
+        values = [_fmt_table_cell(_fmt_val(row.get(col))) for col in visible_columns]
+        lines.append("| " + " | ".join(values) + " |")
+
+    notes: list[str] = []
+    if hidden_columns:
+        notes.append(
+            f"(+ {len(hidden_columns)} more columns: {', '.join(hidden_columns)})"
+        )
+    if len(rows) > row_limit:
+        notes.append(f"... ({len(rows)} rows total)")
+    if notes:
+        return "\n".join(lines + [""] + notes)
     return "\n".join(lines)
 
 
@@ -598,6 +627,10 @@ def _fmt_val(v: Any) -> str:
     if isinstance(v, float):
         return f"{v:.4g}"
     return str(v)
+
+
+def _fmt_table_cell(value: str) -> str:
+    return value.replace("|", r"\|").replace("\n", " ")
 
 
 def _is_temporal_dtype(dtype: str) -> bool:

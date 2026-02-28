@@ -141,11 +141,11 @@ Drop the default sample count from 8 to 5. For non-focus tables in compact view,
 
 ---
 
-## Sprint 3: Hypothesis Filtering and Row Format
+## Sprint 3: Hypothesis Filtering and Row Format [✅ Completed]
 
 **Goal:** Reduce hypothesis bloat and make row data more token-efficient.
 
-### 3.1 — Filter hypotheses by relevance
+### 3.1 — Filter hypotheses by relevance [✅ Completed]
 
 Change `_format_hypotheses()` to group and filter:
 
@@ -162,7 +162,7 @@ def _format_hypotheses(
 - **Resolved** (validated, invalidated, narrowed, inconclusive): Show only a count line by default (`"5 resolved hypotheses (3 validated, 2 invalidated)"`). When `include_resolved=True`, show the last `max_resolved` with their verdicts.
 - **Claim truncation**: Truncate hypothesis claims to 150 chars in the formatted output. The full claim is in the database if needed.
 
-### 3.2 — Tabular row format
+### 3.2 — Tabular row format [✅ Completed]
 
 Replace the `col=val` row format with a compact table (pipe-delimited markdown):
 
@@ -177,7 +177,7 @@ This eliminates column name repetition on every row. For a 15-column, 20-row res
 
 For wide tables (>10 columns), only include the first 10 columns in the table and append a note: `(+ 5 more columns: col11, col12, ...)`. The model can request a wider view in its next step if needed.
 
-### 3.3 — Adaptive row count
+### 3.3 — Adaptive row count [✅ Completed]
 
 Add a `max_display_rows` config option (default: 15) and use it in `_format_rows()`. The current hardcoded 20 is slightly generous — 15 rows of a compact table provides ample signal. For statistical-mode results, drop to 5 rows (the statistical analyst already has access to the full data).
 

@@ -46,6 +46,7 @@ class NemoConfig:
     arbiter_interval: int = 3
     max_validation_steps: int = 5
     arbiter_model: str = "gpt-5.2"
+    max_display_rows: int = 15
     max_analysis_rows: int = 50000
     analysis_timeout_seconds: int = 30
     analyst_max_iterations: int = 8
@@ -113,6 +114,7 @@ class NemoConfig:
         config.arbiter_interval = int(exploration.get("arbiter_interval", config.arbiter_interval))
         config.max_validation_steps = int(exploration.get("max_validation_steps", config.max_validation_steps))
         config.arbiter_model = str(exploration.get("arbiter_model", config.arbiter_model))
+        config.max_display_rows = int(exploration.get("max_display_rows", config.max_display_rows))
 
         analysis = raw.get("analysis", {})
         config.max_analysis_rows = int(analysis.get("max_analysis_rows", config.max_analysis_rows))
@@ -191,6 +193,7 @@ def write_default_config(path: Path) -> None:
             "arbiter_interval": defaults.arbiter_interval,
             "max_validation_steps": defaults.max_validation_steps,
             "arbiter_model": defaults.arbiter_model,
+            "max_display_rows": defaults.max_display_rows,
         },
         "analysis": {
             "max_analysis_rows": defaults.max_analysis_rows,

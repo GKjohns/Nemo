@@ -23,7 +23,7 @@ from nemo.planner import (
     score_frontier,
     select_next,
 )
-from nemo.planner.arbiter import decide_phase, should_consult_arbiter
+from nemo.planner.arbiter import _format_hypotheses, decide_phase, should_consult_arbiter
 from nemo.planner.models import (
     DuplicateCheck,
     EvidenceLink,
@@ -38,6 +38,7 @@ from nemo.planner.strategist import (
     Notebook,
     NotebookEntry,
     apply_notebook_update,
+    _format_rows,
     build_schema_context,
     format_notebook,
     interpret_and_update,
@@ -807,6 +808,155 @@ def test_validation_evidence_classification():
     assert classify_validation_evidence("After controlling for seasonality, effect disappears.") == "confounds"
     assert classify_validation_evidence("The hypothesis is not supported and fails to reproduce.") == "contradicts"
     assert classify_validation_evidence("Effect remains strong versus baseline.") == "supports"
+
+
+def test_format_hypotheses_filters_resolved_and_truncates_claims():
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_active_high",
+            claim="A" * 220,
+            source_insight_id="insight_1",
+            initial_confidence=0.81,
+            status="proposed",
+            priority=0.95,
+        ),
+        HypothesisRecord(
+            hypothesis_id="hyp_active_low",
+            claim="Short active claim.",
+            source_insight_id="insight_2",
+            initial_confidence=0.62,
+            status="testing",
+            priority=0.4,
+        ),
+        HypothesisRecord(
+            hypothesis_id="hyp_resolved",
+            claim="Resolved claim should only appear when requested.",
+            source_insight_id="insight_3",
+            initial_confidence=0.7,
+            status="validated",
+            priority=0.5,
+            verdict="Signal reproduced.",
+        ),
+    ]
+
+    text = _format_hypotheses(hypotheses, include_resolved=False, max_active=10)
+    assert "Active hypotheses:" in text
+    assert "hyp_active_high" in text
+    assert "hyp_active_low" in text
+    assert "Resolved hypotheses: 1 (1 validated)" in text
+    assert "Recent resolved hypotheses" not in text
+    assert "A" * 151 not in text
+    assert "..." in text
+
+
+def test_format_hypotheses_can_include_recent_resolved_entries():
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_resolved_old",
+            claim="Old resolved hypothesis.",
+            source_insight_id="insight_10",
+            initial_confidence=0.65,
+            status="invalidated",
+            priority=0.3,
+            verdict="Did not reproduce.",
+        ),
+        HypothesisRecord(
+            hypothesis_id="hyp_resolved_new",
+            claim="New resolved hypothesis.",
+            source_insight_id="insight_11",
+            initial_confidence=0.78,
+            status="validated",
+            priority=0.6,
+            verdict="Replicated in holdout.",
+        ),
+    ]
+
+    text = _format_hypotheses(hypotheses, include_resolved=True, max_resolved=1)
+    assert "Recent resolved hypotheses:" in text
+    assert "hyp_resolved_new" in text
+    assert "hyp_resolved_old" not in text
+
+
+def test_format_rows_uses_markdown_table_and_caps_wide_results():
+    columns = [f"col_{idx}" for idx in range(1, 13)]
+    rows = [
+        {column: f"v1_{column}" for column in columns},
+        {column: f"v2_{column}" for column in columns},
+    ]
+    text = _format_rows(rows, columns, max_rows=1, max_columns=10)
+    assert "| col_1 | col_2 | col_3 |" in text
+    assert "| v1_col_1 | v1_col_2 | v1_col_3 |" in text
+    assert "(+ 2 more columns: col_11, col_12)" in text
+    assert "... (2 rows total)" in text
+    assert "col_1=v1_col_1" not in text
+
+
+def test_interpretation_preview_caps_rows_for_statistical_mode():
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.last_input = None
+
+        def parse(self, **kwargs):
+            self.last_input = kwargs.get("input")
+            return type(
+                "Resp",
+                (),
+                {
+                    "output_parsed": InterpretationResult(
+                        title="Stat preview",
+                        claim="Preview looks fine.",
+                        confidence=0.6,
+                        reasoning="Rows are capped for statistical context.",
+                        theme="Stats",
+                        summary_update="Stats summary updated.",
+                        new_finding="Statistical rows were sampled.",
+                        new_open_questions=[],
+                        resolved_questions=[],
+                    ),
+                    "output": [],
+                },
+            )()
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    hypothesis = Hypothesis(
+        question="Is segment effect statistically significant?",
+        reasoning="Need inferential test.",
+        sql='SELECT "segment", "amount" FROM "orders" LIMIT 200',
+        table="orders",
+        analysis_type="statistical",
+    )
+    result = ExecutionResult(
+        sql=hypothesis.sql,
+        rows=[
+            {"segment": "A", "amount": idx}
+            for idx in [1, 2, 3, 4, 5, 6]
+        ],
+        row_count=6,
+        column_names=["segment", "amount"],
+        truncated=False,
+        cost_ms=5,
+        error=None,
+    )
+    notebook = Notebook()
+    fake_client = _FakeClient()
+    parsed = asyncio.run(
+        interpret_and_update(
+            hypothesis=hypothesis,
+            result=result,
+            notebook=notebook,
+            schema_context='orders("segment", "amount")',
+            config=NemoConfig(max_display_rows=15),
+            client=fake_client,  # type: ignore[arg-type]
+        )
+    )
+    assert parsed.title == "Stat preview"
+    prompt = str(fake_client.responses.last_input)
+    assert "... (6 rows total)" in prompt
+    assert "| A | 5 |" in prompt
+    assert "| A | 6 |" not in prompt
 
 
 def test_format_notebook_empty():

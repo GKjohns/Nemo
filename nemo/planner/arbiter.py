@@ -14,6 +14,9 @@ from nemo.planner.strategist import Notebook, format_notebook
 _CONSECUTIVE_EXPLORE_FORCE_EXPLOIT = 5
 _HIGH_CONFIDENCE_THRESHOLD = 0.7
 _MIN_HIGH_CONFIDENCE_HYPOTHESES = 2
+_ACTIVE_HYPOTHESIS_STATUSES = {"proposed", "testing"}
+_RESOLVED_HYPOTHESIS_STATUSES = {"validated", "invalidated", "narrowed", "inconclusive"}
+_CLAIM_PREVIEW_CHARS = 150
 
 ARBITER_SYSTEM = """\
 You are the strategic advisor for an automated data exploration agent.
@@ -173,9 +176,8 @@ def _build_arbiter_context(
     touched = sorted({t for entry in notebook.entries for t in entry.tables_touched if t})
     untouched = sorted([t for t in all_tables if t not in set(touched)])
 
-    formatted_hypotheses = _format_hypotheses(hypotheses)
+    formatted_hypotheses = _format_hypotheses(hypotheses, include_resolved=False)
     recent = _format_recent_phases(recent_phases)
-    knowledge_summary = _build_knowledge_summary(notebook, hypotheses)
     consecutive_explores = _count_consecutive_explores(recent_phases)
 
     goal_section = ""
@@ -196,11 +198,8 @@ def _build_arbiter_context(
         )
 
     return f"""\
-## State of Knowledge
-{knowledge_summary}
-
 ## Investigation Notebook
-{format_notebook(notebook)}
+{format_notebook(notebook, detail="summary")}
 
 ## Hypothesis Backlog
 {formatted_hypotheses}
@@ -229,59 +228,65 @@ If EXPLOIT, set hypothesis_id to the highest-priority hypothesis to test now.
 """
 
 
-def _build_knowledge_summary(notebook: Notebook, hypotheses: list[HypothesisRecord]) -> str:
-    """Concise summary of what is established, what's uncertain, and what's untested."""
-    if not notebook.entries and not hypotheses:
-        return "(Investigation has not started yet.)"
-
-    parts: list[str] = []
-
-    established: list[str] = []
-    for entry in notebook.entries:
-        for finding in entry.key_findings[-3:]:
-            established.append(f"- [{entry.theme}] {finding}")
-    if established:
-        parts.append("**Established findings:**\n" + "\n".join(established[-10:]))
-
-    open_qs: list[str] = []
-    for entry in notebook.entries:
-        for q in entry.open_questions[-2:]:
-            open_qs.append(f"- [{entry.theme}] {q}")
-    if open_qs:
-        parts.append("**Open questions:**\n" + "\n".join(open_qs[-8:]))
-
-    untested = [h for h in hypotheses if h.status == "proposed"]
-    tested = [h for h in hypotheses if h.status not in {"proposed", "testing"}]
-    in_test = [h for h in hypotheses if h.status == "testing"]
-
-    if untested:
-        top_untested = sorted(untested, key=lambda h: -float(h.priority))[:5]
-        lines = [
-            f"- {h.hypothesis_id} (conf={h.initial_confidence:.2f}): {h.claim[:120]}"
-            for h in top_untested
-        ]
-        parts.append(f"**Untested hypotheses ({len(untested)} total, top 5):**\n" + "\n".join(lines))
-    if in_test:
-        lines = [f"- {h.hypothesis_id} step={h.validation_step}: {h.claim[:120]}" for h in in_test]
-        parts.append("**Currently testing:**\n" + "\n".join(lines))
-    if tested:
-        lines = [f"- {h.hypothesis_id} [{h.status}]: {h.claim[:120]}" for h in tested[-5:]]
-        parts.append("**Resolved hypotheses:**\n" + "\n".join(lines))
-
-    return "\n\n".join(parts) if parts else "(No structured knowledge yet.)"
-
-
-def _format_hypotheses(hypotheses: list[HypothesisRecord]) -> str:
+def _format_hypotheses(
+    hypotheses: list[HypothesisRecord],
+    include_resolved: bool = False,
+    max_active: int = 10,
+    max_resolved: int = 3,
+) -> str:
     if not hypotheses:
         return "(none)"
+
+    max_active_count = max(0, int(max_active))
+    max_resolved_count = max(0, int(max_resolved))
+    active = [h for h in hypotheses if h.status in _ACTIVE_HYPOTHESIS_STATUSES]
+    resolved = [h for h in hypotheses if h.status in _RESOLVED_HYPOTHESIS_STATUSES]
+
     lines: list[str] = []
-    for h in hypotheses:
-        evidence_count = len(h.evidence_chain)
-        lines.append(
-            f"- {h.hypothesis_id} [{h.status}] p={h.priority:.2f}, init={h.initial_confidence:.2f}, "
-            f"validation_step={h.validation_step}, evidence={evidence_count}: {h.claim}"
-        )
+    lines.append("Active hypotheses:")
+    if active:
+        ranked_active = sorted(active, key=lambda h: (float(h.priority), h.updated_at), reverse=True)
+        for h in ranked_active[:max_active_count]:
+            evidence_count = len(h.evidence_chain)
+            lines.append(
+                f"- {h.hypothesis_id} [{h.status}] p={h.priority:.2f}, init={h.initial_confidence:.2f}, "
+                f"validation_step={h.validation_step}, evidence={evidence_count}: {_truncate_claim(h.claim)}"
+            )
+    else:
+        lines.append("(none)")
+
+    lines.append(f"Resolved hypotheses: {len(resolved)} ({_summarize_resolved_statuses(resolved)})")
+    if include_resolved and resolved and max_resolved_count > 0:
+        lines.append("Recent resolved hypotheses:")
+        recent_resolved = sorted(resolved, key=lambda h: h.updated_at, reverse=True)
+        for h in recent_resolved[:max_resolved_count]:
+            verdict_suffix = f", verdict={h.verdict}" if h.verdict else ""
+            lines.append(
+                f"- {h.hypothesis_id} [{h.status}] confidence={h.verdict_confidence or h.initial_confidence:.2f}"
+                f"{verdict_suffix}: {_truncate_claim(h.claim)}"
+            )
     return "\n".join(lines)
+
+
+def _truncate_claim(claim: str, max_chars: int = _CLAIM_PREVIEW_CHARS) -> str:
+    trimmed = claim.strip()
+    if len(trimmed) <= max_chars:
+        return trimmed
+    return trimmed[: max_chars - 3].rstrip() + "..."
+
+
+def _summarize_resolved_statuses(resolved: list[HypothesisRecord]) -> str:
+    if not resolved:
+        return "none"
+    order = ["validated", "invalidated", "narrowed", "inconclusive"]
+    counts: dict[str, int] = {}
+    for record in resolved:
+        counts[record.status] = counts.get(record.status, 0) + 1
+    parts: list[str] = [f"{counts[status]} {status}" for status in order if counts.get(status, 0) > 0]
+    extras = [status for status in counts if status not in order]
+    for status in sorted(extras):
+        parts.append(f"{counts[status]} {status}")
+    return ", ".join(parts) if parts else "none"
 
 
 def _format_recent_phases(recent_phases: list[PhaseDecision]) -> str:

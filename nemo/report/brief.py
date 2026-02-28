@@ -10,6 +10,7 @@ from typing import Any
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
 from nemo.graph import find_contradiction_clusters
+from nemo.planner.arbiter import _format_hypotheses
 from nemo.planner.models import HypothesisRecord
 from nemo.planner.strategist import Notebook, format_notebook
 from nemo.store import NemoStore
@@ -76,19 +77,10 @@ def _build_debrief_context(
     parts: list[str] = []
 
     parts.append("## Investigation Notebook")
-    parts.append(format_notebook(notebook))
+    parts.append(format_notebook(notebook, detail="full"))
 
     parts.append("\n## Hypothesis Outcomes")
-    if not hypotheses:
-        parts.append("(no hypotheses were proposed)")
-    else:
-        for h in hypotheses:
-            evidence_count = len(h.evidence_chain)
-            verdict_line = f" Verdict: {h.verdict}" if h.verdict else ""
-            parts.append(
-                f"- {h.hypothesis_id} [{h.status}] confidence={h.verdict_confidence or h.initial_confidence:.2f}, "
-                f"evidence={evidence_count}: {h.claim}{verdict_line}"
-            )
+    parts.append(_format_hypotheses(hypotheses, include_resolved=True))
 
     parts.append("\n## Run Statistics")
     parts.append(f"Steps: {stats.get('steps', 0)}")
