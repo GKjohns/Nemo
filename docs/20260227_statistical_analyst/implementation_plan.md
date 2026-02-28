@@ -552,7 +552,7 @@ All commands below assume you have a local venv set up per `docs/testing.md`. If
 python3 -m venv .venv && .venv/bin/python -m pip install -e . pytest
 ```
 
-### Phase 1: Sandbox & Execution Foundation
+### Phase 1: Sandbox & Execution Foundation [✅ Completed]
 
 **Status:** Completed on 2026-02-27 (unit tests + smoke test passing)
 
@@ -575,6 +575,9 @@ python3 -m venv .venv && .venv/bin/python -m pip install -e . pytest
 
 **Smoke test:**
 ```bash
+# Always run the fast suite first (docs/testing.md default path)
+.venv/bin/python -m pytest -q
+
 # Run the sandbox unit tests
 .venv/bin/python -m pytest -q tests/test_sandbox.py
 
@@ -592,6 +595,8 @@ print('Phase 1 smoke test PASSED')
 ---
 
 ### Phase 2: Analyst Agent
+
+**Status:** Completed on 2026-02-27 (unit tests + smoke test passing)
 
 **Work:**
 - `executor/analyst.py`: ReAct agent with `describe_table`, `extract_dataframe`, `run_python` tools
@@ -612,6 +617,9 @@ print('Phase 1 smoke test PASSED')
 
 **Smoke test:**
 ```bash
+# Always run the fast suite first (docs/testing.md default path)
+.venv/bin/python -m pytest -q
+
 # Run analyst unit tests
 .venv/bin/python -m pytest -q tests/test_analyst.py
 
@@ -717,7 +725,10 @@ print('Phase 3 e2e smoke test PASSED')
 
 **Smoke test:**
 ```bash
-# Run all tests including planner
+# Always run the fast suite first (docs/testing.md default path)
+.venv/bin/python -m pytest -q
+
+# Then run focused validator + analyst-related tests
 .venv/bin/python -m pytest -q tests/test_planner.py tests/test_analyst.py tests/test_sandbox.py tests/test_executor.py
 
 # Run a longer exploration (5 steps) that's more likely to trigger exploit phase
