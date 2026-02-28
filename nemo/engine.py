@@ -478,7 +478,10 @@ class NemoEngine:
             )
 
             proposed_claim = (interpretation.proposed_hypothesis or "").strip()
-            if proposed_claim:
+            is_during_validation = validation_target is not None
+            if proposed_claim and not _should_suppress_hypothesis(
+                proposed_claim, hypotheses, is_during_validation
+            ):
                 proposed_tables = sorted({
                     *source_tables,
                     *[
@@ -487,19 +490,19 @@ class NemoEngine:
                         if "." not in str(tag) and str(tag).isidentifier()
                     ],
                 })
+                raw_confidence = float(
+                    interpretation.hypothesis_confidence
+                    if interpretation.hypothesis_confidence is not None
+                    else interpretation.confidence
+                )
+                priority = raw_confidence
+                if is_during_validation:
+                    priority = max(0.0, raw_confidence - 0.2)
                 hypothesis_record = HypothesisRecord(
                     claim=proposed_claim,
                     source_insight_id=insight_id,
-                    initial_confidence=(
-                        interpretation.hypothesis_confidence
-                        if interpretation.hypothesis_confidence is not None
-                        else interpretation.confidence
-                    ),
-                    priority=float(
-                        interpretation.hypothesis_confidence
-                        if interpretation.hypothesis_confidence is not None
-                        else interpretation.confidence
-                    ),
+                    initial_confidence=raw_confidence,
+                    priority=priority,
                     tables_involved=proposed_tables,
                 )
                 hypotheses.append(hypothesis_record)
@@ -1586,6 +1589,34 @@ async def is_semantically_duplicate(
         threshold = float(config.question_similarity_threshold)
         return _is_duplicate_question(text, candidate_texts, threshold=threshold)
     return _is_duplicate_claim(text, candidate_texts)
+
+
+def _should_suppress_hypothesis(
+    claim: str,
+    existing_hypotheses: list[HypothesisRecord],
+    is_during_validation: bool,
+) -> bool:
+    """Suppress hypothesis proposals that are too similar to existing ones.
+
+    During validation, also suppress proposals that share heavy token overlap
+    with the hypothesis currently being validated, to prevent exploit cascades.
+    """
+    claim_lower = claim.lower()
+    claim_tokens = _normalize_tokens(claim_lower)
+    if not claim_tokens:
+        return False
+
+    for h in existing_hypotheses:
+        existing_tokens = _normalize_tokens(h.claim.lower())
+        if not existing_tokens:
+            continue
+        intersection = len(claim_tokens & existing_tokens)
+        jaccard = intersection / len(claim_tokens | existing_tokens)
+        overlap = intersection / min(len(claim_tokens), len(existing_tokens))
+        threshold = 0.45 if is_during_validation else 0.6
+        if max(jaccard, overlap) >= threshold:
+            return True
+    return False
 
 
 def _adjust_confidence_for_statistics(

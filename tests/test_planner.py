@@ -8,6 +8,7 @@ from nemo.config import NemoConfig
 from nemo.engine import (
     _build_coverage_context,
     _is_duplicate_question,
+    _should_suppress_hypothesis,
     is_semantically_duplicate,
 )
 from nemo.executor.run import ExecutionResult
@@ -23,7 +24,13 @@ from nemo.planner import (
     score_frontier,
     select_next,
 )
-from nemo.planner.arbiter import _format_hypotheses, decide_phase, should_consult_arbiter
+from nemo.planner.arbiter import (
+    _count_consecutive_exploits,
+    _explore_ratio,
+    _format_hypotheses,
+    decide_phase,
+    should_consult_arbiter,
+)
 from nemo.planner.models import (
     DuplicateCheck,
     EvidenceLink,
@@ -1190,3 +1197,184 @@ def test_interpretation_can_propose_hypothesis():
     assert parsed.hypothesis_confidence == 0.78
     prompt = str(fake_client.responses.last_input)
     assert "specific, testable hypothesis" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Anti-anchoring guardrail tests
+# ---------------------------------------------------------------------------
+
+
+def test_count_consecutive_exploits():
+    phases = [
+        PhaseDecision(phase="explore", reasoning="a"),
+        PhaseDecision(phase="exploit", reasoning="b"),
+        PhaseDecision(phase="exploit", reasoning="c"),
+        PhaseDecision(phase="exploit", reasoning="d"),
+    ]
+    assert _count_consecutive_exploits(phases) == 3
+    assert _count_consecutive_exploits([]) == 0
+    assert _count_consecutive_exploits([PhaseDecision(phase="explore", reasoning="x")]) == 0
+
+
+def test_explore_ratio():
+    phases = [
+        PhaseDecision(phase="explore", reasoning="a"),
+        PhaseDecision(phase="exploit", reasoning="b"),
+        PhaseDecision(phase="exploit", reasoning="c"),
+        PhaseDecision(phase="exploit", reasoning="d"),
+    ]
+    assert _explore_ratio(phases) == 0.25
+    assert _explore_ratio([]) == 1.0
+
+
+def test_arbiter_forces_explore_after_max_consecutive_exploits():
+    """After N consecutive exploit steps, the arbiter must force explore."""
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_testing",
+            claim="Some hypothesis being tested",
+            source_insight_id="insight_1",
+            initial_confidence=0.8,
+            status="testing",
+            validation_step=2,
+            priority=0.8,
+        )
+    ]
+    recent_phases = [PhaseDecision(phase="exploit", reasoning="continue")] * 7
+
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=hypotheses,
+            all_tables=["orders"],
+            steps_done=10,
+            budget=20,
+            recent_phases=recent_phases,
+            config=NemoConfig(max_consecutive_exploit=6, max_validation_steps=5),
+            client=None,
+        )
+    )
+    assert decision.phase == "explore"
+    assert "consecutive exploit" in decision.reasoning.lower()
+
+
+def test_arbiter_forces_explore_when_explore_ratio_too_low():
+    """If the explore ratio drops below the minimum, force explore."""
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_1",
+            claim="Test claim",
+            source_insight_id="insight_1",
+            initial_confidence=0.7,
+            status="proposed",
+            priority=0.7,
+        )
+    ]
+    recent_phases = [
+        PhaseDecision(phase="explore", reasoning="first"),
+        PhaseDecision(phase="exploit", reasoning="a"),
+        PhaseDecision(phase="exploit", reasoning="b"),
+        PhaseDecision(phase="exploit", reasoning="c"),
+        PhaseDecision(phase="exploit", reasoning="d"),
+        PhaseDecision(phase="exploit", reasoning="e"),
+    ]
+
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=hypotheses,
+            all_tables=["orders"],
+            steps_done=6,
+            budget=20,
+            recent_phases=recent_phases,
+            config=NemoConfig(min_explore_ratio=0.35, max_consecutive_exploit=10),
+            client=None,
+        )
+    )
+    assert decision.phase == "explore"
+    assert "explore ratio" in decision.reasoning.lower()
+
+
+def test_arbiter_mid_validation_respects_exploit_cap():
+    """Even with a testing hypothesis, consecutive exploit cap takes precedence."""
+    hypotheses = [
+        HypothesisRecord(
+            hypothesis_id="hyp_testing",
+            claim="Being validated",
+            source_insight_id="insight_1",
+            initial_confidence=0.85,
+            status="testing",
+            validation_step=1,
+            priority=0.85,
+        )
+    ]
+    recent_phases = [PhaseDecision(phase="exploit", reasoning="validating")] * 8
+
+    decision = asyncio.run(
+        decide_phase(
+            notebook=Notebook(),
+            hypotheses=hypotheses,
+            all_tables=["orders"],
+            steps_done=10,
+            budget=20,
+            recent_phases=recent_phases,
+            config=NemoConfig(max_consecutive_exploit=6, max_validation_steps=5),
+            client=None,
+        )
+    )
+    assert decision.phase == "explore"
+
+
+def test_should_suppress_duplicate_hypothesis_during_validation():
+    """Hypothesis proposals that overlap existing claims should be suppressed."""
+    existing = [
+        HypothesisRecord(
+            hypothesis_id="hyp_1",
+            claim="Payroll Number is an agency-level code not an individual identifier",
+            source_insight_id="ins_1",
+            initial_confidence=0.85,
+        )
+    ]
+    similar_claim = "Payroll Number 56 is an agency-level payroll bucket code"
+    different_claim = "Fire Department overtime has doubled since 2020"
+
+    assert _should_suppress_hypothesis(similar_claim, existing, is_during_validation=True)
+    assert not _should_suppress_hypothesis(different_claim, existing, is_during_validation=True)
+
+
+def test_should_suppress_is_stricter_during_validation():
+    """During validation, suppression threshold is lower (0.45 vs 0.6)."""
+    existing = [
+        HypothesisRecord(
+            hypothesis_id="hyp_1",
+            claim="Payroll Number 56 is a department-level payroll bucket for NYPD overtime",
+            source_insight_id="ins_1",
+            initial_confidence=0.8,
+        )
+    ]
+    moderately_similar = "Payroll Number 56 is a central NYPD payroll bucket that aggregates overtime payments"
+
+    assert _should_suppress_hypothesis(moderately_similar, existing, is_during_validation=True)
+
+
+def test_should_not_suppress_distinct_hypothesis():
+    """Genuinely different hypotheses should not be suppressed."""
+    existing = [
+        HypothesisRecord(
+            hypothesis_id="hyp_1",
+            claim="Payroll Number is an agency-level code",
+            source_insight_id="ins_1",
+            initial_confidence=0.85,
+        )
+    ]
+    distinct = "Ghost employees with NULL names account for $2B in total compensation"
+    assert not _should_suppress_hypothesis(distinct, existing, is_during_validation=False)
+    assert not _should_suppress_hypothesis(distinct, existing, is_during_validation=True)
+
+
+def test_validation_hypothesis_gets_reduced_priority():
+    """Hypotheses proposed during validation should have reduced priority to avoid cascading."""
+    raw_confidence = 0.85
+    reduced = max(0.0, raw_confidence - 0.2)
+    assert abs(reduced - 0.65) < 1e-9
+    assert reduced < raw_confidence

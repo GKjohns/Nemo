@@ -46,6 +46,9 @@ class NemoConfig:
     arbiter_interval: int = 3
     max_validation_steps: int = 5
     arbiter_model: str = "gpt-5.2"
+    max_consecutive_exploit: int = 6
+    min_explore_ratio: float = 0.35
+    hypothesis_priority_decay: float = 0.15
     max_display_rows: int = 15
     max_analysis_rows: int = 50000
     analysis_timeout_seconds: int = 30
@@ -115,6 +118,15 @@ class NemoConfig:
         config.max_validation_steps = int(exploration.get("max_validation_steps", config.max_validation_steps))
         config.arbiter_model = str(exploration.get("arbiter_model", config.arbiter_model))
         config.max_display_rows = int(exploration.get("max_display_rows", config.max_display_rows))
+        config.max_consecutive_exploit = int(
+            exploration.get("max_consecutive_exploit", config.max_consecutive_exploit)
+        )
+        config.min_explore_ratio = float(
+            exploration.get("min_explore_ratio", config.min_explore_ratio)
+        )
+        config.hypothesis_priority_decay = float(
+            exploration.get("hypothesis_priority_decay", config.hypothesis_priority_decay)
+        )
 
         analysis = raw.get("analysis", {})
         config.max_analysis_rows = int(analysis.get("max_analysis_rows", config.max_analysis_rows))
@@ -194,6 +206,9 @@ def write_default_config(path: Path) -> None:
             "max_validation_steps": defaults.max_validation_steps,
             "arbiter_model": defaults.arbiter_model,
             "max_display_rows": defaults.max_display_rows,
+            "max_consecutive_exploit": defaults.max_consecutive_exploit,
+            "min_explore_ratio": defaults.min_explore_ratio,
+            "hypothesis_priority_decay": defaults.hypothesis_priority_decay,
         },
         "analysis": {
             "max_analysis_rows": defaults.max_analysis_rows,

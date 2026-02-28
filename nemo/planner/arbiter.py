@@ -12,6 +12,7 @@ from nemo.planner.models import HypothesisRecord, PhaseDecision
 from nemo.planner.strategist import Notebook, format_notebook
 
 _CONSECUTIVE_EXPLORE_FORCE_EXPLOIT = 5
+_DEFAULT_MAX_CONSECUTIVE_EXPLOIT = 6
 _HIGH_CONFIDENCE_THRESHOLD = 0.7
 _MIN_HIGH_CONFIDENCE_HYPOTHESES = 2
 _ACTIVE_HYPOTHESIS_STATUSES = {"proposed", "testing"}
@@ -66,6 +67,38 @@ def _count_consecutive_explores(recent_phases: list[PhaseDecision]) -> int:
     return count
 
 
+def _count_consecutive_exploits(recent_phases: list[PhaseDecision]) -> int:
+    """Count how many consecutive EXPLOIT decisions trail the recent list."""
+    count = 0
+    for decision in reversed(recent_phases):
+        if decision.phase == "exploit":
+            count += 1
+        else:
+            break
+    return count
+
+
+def _explore_ratio(recent_phases: list[PhaseDecision]) -> float:
+    """Fraction of recent decisions that were EXPLORE (0.0 if no history)."""
+    if not recent_phases:
+        return 1.0
+    explores = sum(1 for d in recent_phases if d.phase == "explore")
+    return explores / len(recent_phases)
+
+
+def _recently_validated_themes(hypotheses: list[HypothesisRecord]) -> set[str]:
+    """Collect themes/tables from recently resolved hypotheses."""
+    themes: set[str] = set()
+    resolved = [h for h in hypotheses if h.status in _RESOLVED_HYPOTHESIS_STATUSES]
+    for h in resolved:
+        themes.update(t.lower().strip() for t in h.tables_involved if t.strip())
+        for token in h.claim.lower().split()[:10]:
+            cleaned = token.strip(".,;:()\"'")
+            if len(cleaned) > 3:
+                themes.add(cleaned)
+    return themes
+
+
 async def decide_phase(
     notebook: Notebook,
     hypotheses: list[HypothesisRecord],
@@ -86,6 +119,32 @@ async def decide_phase(
     if not proposed and not testing:
         return PhaseDecision(phase="explore", reasoning="No hypotheses to validate yet.")
 
+    max_consecutive_exploit = int(getattr(config, "max_consecutive_exploit", _DEFAULT_MAX_CONSECUTIVE_EXPLOIT))
+    min_explore_ratio = float(getattr(config, "min_explore_ratio", 0.35))
+    consecutive_exploits = _count_consecutive_exploits(recent_phases)
+    ratio = _explore_ratio(recent_phases)
+
+    # --- ANTI-ANCHORING: force explore after too many consecutive exploits ---
+    if consecutive_exploits >= max_consecutive_exploit:
+        return PhaseDecision(
+            phase="explore",
+            reasoning=(
+                f"Forcing explore: {consecutive_exploits} consecutive exploit steps reached the "
+                f"limit ({max_consecutive_exploit}). Switching to exploration for breadth."
+            ),
+        )
+
+    # --- ANTI-ANCHORING: maintain minimum explore ratio ---
+    if len(recent_phases) >= 4 and ratio < min_explore_ratio:
+        return PhaseDecision(
+            phase="explore",
+            reasoning=(
+                f"Forcing explore: explore ratio {ratio:.0%} is below minimum "
+                f"{min_explore_ratio:.0%} ({len(recent_phases)} recent decisions). "
+                f"Need more breadth before further exploitation."
+            ),
+        )
+
     if testing:
         active = max(testing, key=lambda h: h.updated_at)
         if int(active.validation_step) < int(config.max_validation_steps):
@@ -99,7 +158,7 @@ async def decide_phase(
             )
 
     if (budget - steps_done) <= 2 and proposed:
-        best = max(proposed, key=lambda h: float(h.priority))
+        best = _best_hypothesis_with_diversity(proposed, hypotheses, config)
         return PhaseDecision(
             phase="exploit",
             hypothesis_id=best.hypothesis_id,
@@ -113,7 +172,7 @@ async def decide_phase(
         len(high_conf) >= _MIN_HIGH_CONFIDENCE_HYPOTHESES
         and consecutive_explores >= _CONSECUTIVE_EXPLORE_FORCE_EXPLOIT
     ):
-        best = max(high_conf, key=lambda h: float(h.priority))
+        best = _best_hypothesis_with_diversity(high_conf, hypotheses, config)
         return PhaseDecision(
             phase="exploit",
             hypothesis_id=best.hypothesis_id,
@@ -126,7 +185,7 @@ async def decide_phase(
 
     budget_fraction_used = steps_done / max(1, budget)
     if budget_fraction_used >= 0.5 and proposed and consecutive_explores >= 3:
-        best = max(proposed, key=lambda h: float(h.priority))
+        best = _best_hypothesis_with_diversity(proposed, hypotheses, config)
         return PhaseDecision(
             phase="exploit",
             hypothesis_id=best.hypothesis_id,
@@ -139,7 +198,7 @@ async def decide_phase(
 
     if client is None:
         if proposed:
-            best = max(proposed, key=lambda h: float(h.priority))
+            best = _best_hypothesis_with_diversity(proposed, hypotheses, config)
             return PhaseDecision(
                 phase="exploit",
                 hypothesis_id=best.hypothesis_id,
@@ -159,6 +218,31 @@ async def decide_phase(
         config=config,
     )
     return await _call_arbiter_llm(context, config, client)
+
+
+def _best_hypothesis_with_diversity(
+    candidates: list[HypothesisRecord],
+    all_hypotheses: list[HypothesisRecord],
+    config: NemoConfig,
+) -> HypothesisRecord:
+    """Select the best hypothesis, penalizing those on already-validated themes."""
+    decay = float(getattr(config, "hypothesis_priority_decay", 0.15))
+    validated_themes = _recently_validated_themes(all_hypotheses)
+
+    def _effective_priority(h: HypothesisRecord) -> float:
+        base = float(h.priority)
+        if not validated_themes:
+            return base
+        overlap = sum(
+            1 for t in h.tables_involved
+            if t.lower().strip() in validated_themes
+        )
+        claim_tokens = {tok.strip(".,;:()\"'").lower() for tok in h.claim.split()[:15]}
+        theme_overlap = len(claim_tokens & validated_themes)
+        penalty = decay * (overlap + min(theme_overlap, 3))
+        return base - penalty
+
+    return max(candidates, key=_effective_priority)
 
 
 def _build_arbiter_context(
