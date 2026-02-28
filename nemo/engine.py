@@ -16,7 +16,9 @@ from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 from nemo.config import NemoConfig
 from nemo.events import EventBus, EventType, NemoEvent
 from nemo.executor import compile_action, execute_query
+from nemo.executor.analyst import run_statistical_analysis
 from nemo.executor.agent import AGENT_ACTION_TYPES, AgentResult, run_agent_exploration
+from nemo.executor.run import ExecutionResult
 from nemo.graph import find_contradiction_clusters, link_insight, record_learnings, update_thread_cards
 from nemo.hooks import HookResult
 from nemo.ingest.joins import discover_joins
@@ -299,6 +301,7 @@ class NemoEngine:
                         "reasoning": hypothesis.reasoning,
                         "sql": hypothesis.sql,
                         "table": hypothesis.table,
+                        "analysis_type": hypothesis.analysis_type,
                     },
                 )
             )
@@ -381,6 +384,7 @@ class NemoEngine:
                         "reasoning": hypothesis.reasoning,
                         "sql": hypothesis.sql,
                         "table": hypothesis.table,
+                        "analysis_type": hypothesis.analysis_type,
                         "phase": current_decision.phase,
                         "hypothesis_id": validation_target.hypothesis_id if validation_target else None,
                     },
@@ -406,6 +410,7 @@ class NemoEngine:
                         "hypothesis": {
                             "question": hypothesis.question,
                             "reasoning": hypothesis.reasoning,
+                            "analysis_type": hypothesis.analysis_type,
                             "phase": current_decision.phase,
                             "hypothesis_id": validation_target.hypothesis_id if validation_target else None,
                         },
@@ -419,6 +424,7 @@ class NemoEngine:
                 hypothesis=hypothesis,
                 notebook=notebook,
                 schema_ctx=schema_ctx,
+                profiles=profiles,
             )
             errors += execute_errors
             if should_skip:
@@ -656,6 +662,7 @@ class NemoEngine:
                     "row_count": result.row_count,
                     "effect_size": interpretation.effect_size,
                     "tags": interpretation.tags,
+                    "analysis_type": hypothesis.analysis_type,
                     "sql": result.sql,
                     "result_preview": result.rows[:5],
                 },
@@ -664,7 +671,11 @@ class NemoEngine:
             # Record in frontier for audit trail
             self.store.insert_frontier_item(
                 action_type="STRATEGIST",
-                payload_json={"table": hypothesis.table, "question": hypothesis.question},
+                payload_json={
+                    "table": hypothesis.table,
+                    "question": hypothesis.question,
+                    "analysis_type": hypothesis.analysis_type,
+                },
                 dedupe_key=f"strategist:{steps_done}:{hypothesis.question[:80]}",
                 run_id=run_id,
                 thread_id=interpretation.theme,
@@ -790,8 +801,47 @@ class NemoEngine:
         hypothesis: Hypothesis,
         notebook: Notebook,
         schema_ctx: str,
+        profiles: list,
     ) -> tuple[Hypothesis, Any, int, bool]:
-        await self._emit_step_phase(run_id, step_num, "executing", sql=hypothesis.sql)
+        analysis_type = str(hypothesis.analysis_type or "sql").strip().lower()
+        if analysis_type == "statistical":
+            await self._emit_step_phase(
+                run_id,
+                step_num,
+                "analyzing",
+                sql=hypothesis.sql,
+                analysis_type="statistical",
+            )
+            result, error = await self._execute_statistical_analysis(hypothesis, profiles)
+            if result is not None and error is None:
+                return hypothesis, result, 0, False
+
+            error_message = error or "Statistical analysis failed"
+            self.store.insert_learning(
+                run_id=run_id,
+                category="error_pattern",
+                subject=f"STRATEGIST:{hypothesis.table}",
+                detail=error_message,
+                confidence=0.7,
+            )
+            await self._emit_step_error(
+                run_id,
+                step_num,
+                "analyzing",
+                error_message,
+                will_retry=False,
+            )
+            return hypothesis, ExecutionResult(
+                sql=hypothesis.sql,
+                rows=[],
+                row_count=0,
+                column_names=[],
+                truncated=False,
+                cost_ms=0,
+                error=error_message,
+            ), 1, True
+
+        await self._emit_step_phase(run_id, step_num, "executing", sql=hypothesis.sql, analysis_type="sql")
         result = execute_query(self.store, hypothesis.sql, self.config)
 
         if result.error:
@@ -819,6 +869,31 @@ class NemoEngine:
         )
         await self._emit_step_error(run_id, step_num, "executing", result.error, will_retry=False)
         return hypothesis, result, 1, True
+
+    async def _execute_statistical_analysis(
+        self,
+        hypothesis: Hypothesis,
+        profiles: list,
+    ) -> tuple[ExecutionResult | None, str | None]:
+        if self._llm_client is None:
+            return None, "Statistical analysis requires an available LLM client."
+
+        try:
+            analyst_result = await run_statistical_analysis(
+                question=hypothesis.question,
+                extraction_sql=hypothesis.sql,
+                table=hypothesis.table,
+                profiles=profiles,
+                store=self.store,
+                config=self.config,
+                client=self._llm_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+
+        if analyst_result is None:
+            return None, "Statistical analyst did not produce a structured result."
+        return analyst_result.to_execution_result(), None
 
     async def _interpret_strategist_step(
         self,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Literal
 
 from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
@@ -29,6 +29,7 @@ class Hypothesis(BaseModel):
     reasoning: str
     sql: str
     table: str = ""
+    analysis_type: Literal["sql", "statistical"] = "sql"
 
 
 class NotebookEntry(BaseModel):
@@ -125,6 +126,17 @@ You write DuckDB-compatible SQL. Use double-quoted identifiers for column/table 
 Prefer concise aggregations (GROUP BY, window functions, CTEs) over SELECT *. \
 Always add LIMIT (max 200 rows) to prevent huge result sets.
 
+You have two execution modes:
+- sql: Standard DuckDB query. Use for aggregations, counts, distributions, GROUP BY comparisons, ranking, filtering.
+- statistical: Python-based inferential analysis. Use only when the question requires formal statistical methods
+  (for example p-values, regression coefficients with significance, confidence intervals from bootstrapping,
+  or formal hypothesis tests such as t-tests/ANOVA/chi-squared/correlation tests).
+
+When using statistical mode, your `sql` must be a narrow extraction query that fetches only the columns
+required by the statistical method. The SQL is data extraction input for the analyst, not final business output.
+
+Rule of thumb: if SQL GROUP BY can answer it directly, use `sql`. If you need inferential statistics, use `statistical`.
+
 Avoid exploration loops:
 - Do not ask nearly the same question as a recent step.
 - If one theme has already gone deep, pivot to a different table/theme.
@@ -159,7 +171,7 @@ casting, or have specific format patterns. Always double-check your WHERE/GROUP 
 against the samples.
 
 Return a JSON object (no markdown fences):
-{{"question": "The specific question to answer", "reasoning": "Why this is the best next step (reference prior findings if any)", "sql": "DuckDB SQL query", "table": "Primary table being queried"}}"""
+{{"question": "The specific question to answer", "reasoning": "Why this is the best next step (reference prior findings if any)", "sql": "DuckDB SQL query", "table": "Primary table being queried", "analysis_type": "sql|statistical"}}"""
 
 STRATEGIST_RETRY_USER = """\
 Your previous query failed with this error:

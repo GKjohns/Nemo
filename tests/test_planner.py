@@ -75,6 +75,27 @@ def test_generators_and_loader_cover_sprint3_scope(store):
     assert len(get_all_generators(Path("/tmp/path-that-does-not-exist"))) >= 11
 
 
+def test_hypothesis_analysis_type_defaults_to_sql():
+    hypothesis = Hypothesis(
+        question="How many orders are in the table?",
+        reasoning="Start with a baseline volume check.",
+        sql='SELECT COUNT(*) AS c FROM "orders" LIMIT 200',
+        table="orders",
+    )
+    assert hypothesis.analysis_type == "sql"
+
+
+def test_hypothesis_accepts_statistical_analysis_type():
+    hypothesis = Hypothesis(
+        question="Is there a statistically significant difference by segment?",
+        reasoning="This needs inferential testing, not only grouped means.",
+        sql='SELECT "segment", "amount" FROM "orders" WHERE "amount" IS NOT NULL LIMIT 200',
+        table="orders",
+        analysis_type="statistical",
+    )
+    assert hypothesis.analysis_type == "statistical"
+
+
 def test_dedupe_and_scoring_are_deterministic(store):
     ctx = _make_context(store)
     generated = run_generators(ctx)

@@ -26,6 +26,11 @@ arbiter_interval = 3
 max_validation_steps = 5
 arbiter_model = "gpt-5.2"
 
+[analysis]
+max_analysis_rows = 50000
+analysis_timeout_seconds = 30
+analyst_max_iterations = 8
+
 [hints]
 time_columns = []
 important_dimensions = []

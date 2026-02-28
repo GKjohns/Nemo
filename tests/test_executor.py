@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+
 from nemo.config import NemoConfig
+from nemo.engine import NemoEngine
 from nemo.executor import compile_action, execute_query
+from nemo.executor.run import ExecutionResult
+from nemo.events import EventBus
 from nemo.ingest.profile import profile_table
 from nemo.planner.models import FrontierItem
+from nemo.planner.strategist import Hypothesis, Notebook
 
 
 def test_compile_action_for_all_sprint4_types(store):
@@ -62,3 +68,97 @@ def test_execute_query_returns_rows_and_metadata(store):
     assert result.row_count == 2
     assert result.column_names == ["id", "value"]
     assert result.rows[0]["id"] == 1
+
+
+def test_engine_routes_sql_hypothesis_to_execute_query(store, monkeypatch):
+    engine = NemoEngine(store, NemoConfig(), EventBus())
+    hypothesis = Hypothesis(
+        question="Baseline row count",
+        reasoning="Simple SQL validation path.",
+        sql='SELECT 1 AS value',
+        table="demo",
+        analysis_type="sql",
+    )
+
+    called: dict[str, bool] = {"sql": False}
+
+    def _fake_execute_query(_store, sql, _config):
+        called["sql"] = True
+        return ExecutionResult(
+            sql=sql,
+            rows=[{"value": 1}],
+            row_count=1,
+            column_names=["value"],
+            truncated=False,
+            cost_ms=1,
+            error=None,
+        )
+
+    monkeypatch.setattr("nemo.engine.execute_query", _fake_execute_query)
+    result_hypothesis, result, errors, should_skip = asyncio.run(
+        engine._execute_strategist_step(
+            run_id="run_test",
+            step_num=1,
+            hypothesis=hypothesis,
+            notebook=Notebook(),
+            schema_ctx="",
+            profiles=[],
+        )
+    )
+
+    assert called["sql"] is True
+    assert result_hypothesis.analysis_type == "sql"
+    assert result.error is None
+    assert errors == 0
+    assert should_skip is False
+
+
+def test_engine_routes_statistical_hypothesis_to_analyst(store, monkeypatch):
+    engine = NemoEngine(store, NemoConfig(), EventBus())
+    hypothesis = Hypothesis(
+        question="Is segment A higher than B?",
+        reasoning="Requires statistical inference.",
+        sql='SELECT "segment", "amount" FROM "orders" LIMIT 200',
+        table="orders",
+        analysis_type="statistical",
+    )
+
+    called: dict[str, bool] = {"analyst": False}
+
+    async def _fake_execute_statistical_analysis(_hypothesis, _profiles):
+        called["analyst"] = True
+        return (
+            ExecutionResult(
+                sql='SELECT "segment", "amount" FROM "orders" LIMIT 200',
+                rows=[{"test": "ttest_ind", "p_value": 0.03}],
+                row_count=1,
+                column_names=["test", "p_value"],
+                truncated=False,
+                cost_ms=2,
+                error=None,
+            ),
+            None,
+        )
+
+    def _should_not_run_sql(*_args, **_kwargs):
+        raise AssertionError("SQL execution path should not run for statistical hypotheses")
+
+    monkeypatch.setattr(engine, "_execute_statistical_analysis", _fake_execute_statistical_analysis)
+    monkeypatch.setattr("nemo.engine.execute_query", _should_not_run_sql)
+
+    result_hypothesis, result, errors, should_skip = asyncio.run(
+        engine._execute_strategist_step(
+            run_id="run_test",
+            step_num=1,
+            hypothesis=hypothesis,
+            notebook=Notebook(),
+            schema_ctx="",
+            profiles=[],
+        )
+    )
+
+    assert called["analyst"] is True
+    assert result_hypothesis.analysis_type == "statistical"
+    assert result.error is None
+    assert errors == 0
+    assert should_skip is False
