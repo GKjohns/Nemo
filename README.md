@@ -23,7 +23,7 @@ Nemo autonomously explores your datasets — generating SQL queries, executing t
 Requires Python 3.11+.
 
 ```bash
-git clone <repo-url> && cd Nemo
+git clone https://github.com/GKjohns/Nemo.git && cd Nemo
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -36,6 +36,23 @@ export OPENAI_API_KEY="sk-..."
 ```
 
 Or add it to a `.env` file in the project root.
+
+### As a Claude Code skill
+
+The repo ships with a `.claude/skills/nemo/SKILL.md` so Claude Code discovers it automatically when working in this directory. To install globally:
+
+```bash
+# Copy the skill to your personal skills directory
+cp -r /path/to/Nemo/.claude/skills/nemo ~/.claude/skills/nemo
+```
+
+Or per-project:
+
+```bash
+cp -r /path/to/Nemo/.claude/skills/nemo your-project/.claude/skills/nemo
+```
+
+Claude Code will then invoke Nemo when you ask analytical questions about datasets. See `SKILL.md` for full usage instructions.
 
 ## Quickstart
 
