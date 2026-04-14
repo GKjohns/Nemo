@@ -111,6 +111,8 @@ def _classify_batch_llm(
     new_insight: dict[str, Any],
     candidates: list[dict[str, Any]],
     client: OpenAI,
+    *,
+    timeout_seconds: float = 15.0,
 ) -> EdgeClassificationBatch:
     instructions = (
         "Classify relationships between a new analytics insight and prior insights. "
@@ -129,6 +131,7 @@ def _classify_batch_llm(
                 instructions=instructions,
                 input=json.dumps(payload),
                 text_format=EdgeClassificationBatch,
+                timeout=timeout_seconds,
             )
             parsed = response.output_parsed
             if parsed is None:

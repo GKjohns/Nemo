@@ -94,5 +94,11 @@ supabase/.temp/
 nemo.duckdb
 nemo.duckdb*
 
-# Local large dataset snapshot
-dummy_datasets/nyc_city_payroll_20260227.csv
+# Local large dataset snapshots
+dummy_datasets/
+.cursor/mcp.json
+
+# Nemo session artifacts
+sessions/
+reports/
+charts/

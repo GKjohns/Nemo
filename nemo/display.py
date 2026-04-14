@@ -58,22 +58,25 @@ class DisplaySubscriber:
                 f"[{event.step_num}] [bold]{action.get('action_type', 'UNKNOWN')}[/bold] "
                 f"score={float(action.get('score', 0.0)):.3f}"
             )
-        elif event.type == EventType.STEP_PHASE and self.verbose:
+        elif event.type == EventType.STEP_PHASE:
             phase = str(event.payload.get("phase", ""))
-            self.console.print(f"  phase: {phase}")
-            if phase == "executing" and event.payload.get("sql"):
-                self.console.print(f"  sql: {event.payload.get('sql')}")
-            if phase == "analyzing":
-                iteration = event.payload.get("iteration")
-                max_iterations = event.payload.get("analyst_max_iterations")
-                if iteration is not None and max_iterations is not None:
-                    self.console.print(
-                        f"  analyst iteration: {iteration}/{max_iterations} "
-                        f"stage={event.payload.get('analyst_stage', 'tooling')}"
-                    )
-                warning = str(event.payload.get("warning") or "")
-                if warning:
-                    self.console.print(f"  [yellow]warning[/yellow] {warning}")
+            if self.verbose:
+                self.console.print(f"  phase: {phase}")
+                if phase == "executing" and event.payload.get("sql"):
+                    self.console.print(f"  sql: {event.payload.get('sql')}")
+                if phase == "analyzing":
+                    iteration = event.payload.get("iteration")
+                    max_iterations = event.payload.get("analyst_max_iterations")
+                    if iteration is not None and max_iterations is not None:
+                        self.console.print(
+                            f"  analyst iteration: {iteration}/{max_iterations} "
+                            f"stage={event.payload.get('analyst_stage', 'tooling')}"
+                        )
+                    warning = str(event.payload.get("warning") or "")
+                    if warning:
+                        self.console.print(f"  [yellow]warning[/yellow] {warning}")
+            elif not self.quiet and phase in ("executing", "interpreting", "linking", "analyzing"):
+                self.console.print(f"  {phase}...", end="\r")
         elif event.type == EventType.STEP_COMPLETED:
             self.stats.steps += 1
             if not self.quiet:
@@ -111,6 +114,20 @@ class DisplaySubscriber:
                 reasoning = str(event.payload.get("reasoning") or "")
                 if reasoning:
                     self.console.print(f"  reason: {reasoning}")
+        elif event.type == EventType.HYPOTHESIS_FORMED and not self.quiet:
+            question = str(event.payload.get("question") or "")
+            table = str(event.payload.get("table") or "")
+            analysis = str(event.payload.get("analysis_type") or "")
+            self.console.print(
+                f"[cyan]plan[/cyan] {analysis} on [bold]{table}[/bold]: {question[:120]}"
+            )
+            if self.verbose:
+                reasoning = str(event.payload.get("reasoning") or "")
+                if reasoning:
+                    self.console.print(f"  reasoning: {reasoning}")
+                sql = str(event.payload.get("sql") or "")
+                if sql:
+                    self.console.print(f"  sql: {sql}")
         elif event.type == EventType.HYPOTHESIS_PROPOSED and not self.quiet:
             hypothesis_id = str(event.payload.get("hypothesis_id") or "")
             claim = str(event.payload.get("claim") or "")

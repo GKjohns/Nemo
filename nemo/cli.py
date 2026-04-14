@@ -147,7 +147,7 @@ def ls() -> None:
     """List loaded datasets."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         datasets = store.get_datasets()
         if not datasets:
             console.print("[yellow]No datasets loaded yet. Use `nemo add` first.[/yellow]")
@@ -193,7 +193,7 @@ def schema(table_name: str = typer.Argument(..., help="Table name")) -> None:
     """Show schema for a table."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         if not store.table_exists(table_name):
             raise ValueError(f"table not found: {table_name}")
 
@@ -221,7 +221,7 @@ def profile(table_name: str = typer.Argument(..., help="Table name")) -> None:
     """Show a rich profile for a table."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         table_profile = profile_table(store, table_name)
         table = Table(title=f"profile: {table_profile.name} ({table_profile.row_count} rows)")
         table.add_column("Column")
@@ -339,7 +339,7 @@ def status() -> None:
     """Show current project dashboard."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         datasets = store.get_datasets()
         latest = store.list_runs(limit=1)
         latest_run = latest[0] if latest else None
@@ -382,7 +382,7 @@ def brief(
     """Generate a markdown brief from recent results."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         if output is not None:
             out = write_brief_report(store, output, top_n=top)
             console.print(f"[green]brief written[/green] {out}")
@@ -404,7 +404,7 @@ def report(
     """Write a markdown brief to reports/."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         latest_run = store.list_runs(limit=1)
         suffix = "latest"
         if latest_run:
@@ -425,7 +425,7 @@ def stats() -> None:
     """Show evidence graph statistics."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         insights = int(store.execute("SELECT COUNT(*) FROM insights").fetchone()[0])
         edges = int(store.execute("SELECT COUNT(*) FROM edges").fetchone()[0])
         contradictions = int(store.execute("SELECT COUNT(*) FROM edges WHERE type = 'contradicts'").fetchone()[0])
@@ -477,7 +477,7 @@ def contradictions(top: int = typer.Option(10, "--top", "-n", help="Number of cl
     """Show top unresolved contradiction clusters."""
     store: NemoStore | None = None
     try:
-        store = _open_store()
+        store = _open_store(read_only=True)
         clusters = find_contradiction_clusters(store)
         if not clusters:
             console.print("[green]No contradiction clusters found.[/green]")
@@ -510,11 +510,19 @@ def _coming_soon(command_name: str) -> None:
     raise typer.Exit(code=0)
 
 
-def _open_store() -> NemoStore:
+def _open_store(*, read_only: bool = False) -> NemoStore:
     db_path = Path(".").resolve() / "nemo.duckdb"
     if not db_path.exists():
         raise RuntimeError(f"missing {db_path}; run `nemo init` first")
-    return NemoStore(db_path)
+    try:
+        return NemoStore(db_path, read_only=read_only)
+    except Exception as exc:
+        if "lock" in str(exc).lower() and read_only:
+            raise RuntimeError(
+                "database is locked by another process (a run is in progress). "
+                "Read-only commands will work after the run completes."
+            ) from exc
+        raise
 
 
 def _load_config() -> NemoConfig:

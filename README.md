@@ -182,4 +182,4 @@ python -m pytest -q
 
 ## License
 
-Private — all rights reserved.
+MIT — see [LICENSE](LICENSE).

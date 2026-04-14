@@ -27,11 +27,13 @@ SYSTEM_TABLES = (
 class NemoStore:
     """Thin wrapper around a DuckDB database file."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, *, read_only: bool = False):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = duckdb.connect(str(self.db_path))
-        self._migrate()
+        if not read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        if not read_only:
+            self._migrate()
 
     def initialize(self) -> None:
         """Apply the bundled schema.sql file and run any needed migrations."""

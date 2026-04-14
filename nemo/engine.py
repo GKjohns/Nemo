@@ -471,6 +471,14 @@ class NemoEngine:
             )
             insights_created += 1
 
+            self.store.update_run(
+                run_id,
+                steps_completed=steps_done,
+                insights_created=insights_created,
+                errors=errors,
+                frontier_size=self.store.count_frontier(status="queued"),
+            )
+
             full_insight = self.store.get_insight_by_id(insight_id) or {"insight_id": insight_id}
             await self.bus.emit(
                 NemoEvent(type=EventType.INSIGHT_CREATED, run_id=run_id, step_num=steps_done,
@@ -1119,6 +1127,13 @@ class NemoEngine:
                     tags_json=draft.tags,
                 )
                 insights_created += 1
+                self.store.update_run(
+                    run_id,
+                    steps_completed=steps_done,
+                    insights_created=insights_created,
+                    errors=errors,
+                    frontier_size=self.store.count_frontier(status="queued"),
+                )
                 full_insight = self.store.get_insight_by_id(insight_id) or {"insight_id": insight_id}
                 await self.bus.emit(
                     NemoEvent(type=EventType.INSIGHT_CREATED, run_id=run_id,

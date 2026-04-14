@@ -101,7 +101,6 @@ def test_engine_routes_sql_hypothesis_to_execute_query(store, monkeypatch):
             step_num=1,
             hypothesis=hypothesis,
             notebook=Notebook(),
-            schema_ctx="",
             profiles=[],
         )
     )
@@ -156,7 +155,6 @@ def test_engine_routes_statistical_hypothesis_to_analyst(store, monkeypatch):
             step_num=1,
             hypothesis=hypothesis,
             notebook=Notebook(),
-            schema_ctx="",
             profiles=[],
         )
     )
@@ -202,7 +200,6 @@ def test_engine_falls_back_to_sql_when_statistical_analysis_fails(store, monkeyp
             step_num=1,
             hypothesis=hypothesis,
             notebook=Notebook(),
-            schema_ctx="",
             profiles=[],
         )
     )
